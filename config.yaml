@@ -1,0 +1,29 @@
+
+exp_name: method1_clip_shortcut
+seed: 42
+
+data:
+  train_dir: /content/ffhq_sub/train
+  val_dir: /content/ffhq_sub/val
+  image_size: 512
+
+models:
+  sd_model_id: runwayml/stable-diffusion-v1-5
+  clip_vision_id: openai/clip-vit-large-patch14
+
+cond:
+  n_tokens: 4
+  scale_id: 1.0
+  scale_hair: 1.0
+
+train:
+  batch_size: 1
+  lr: 1e-4
+  weight_decay: 0.0
+  max_steps: 500
+  log_every: 25
+  save_every: 500
+  mixed_precision: fp16
+
+infer:
+  steps: 30
