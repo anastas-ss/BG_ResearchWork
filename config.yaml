@@ -23,7 +23,7 @@ cond:
   scale_hair: 2.0
 
 train:
-  batch_size: 1
+  batch_size: 2
   lr: 5e-5
   weight_decay: 0.0
   max_steps: 5000
