@@ -49,7 +49,7 @@ def ddim_sample_with_enc(pipe, noise_scheduler, latents, enc, num_steps: int, ge
         with torch.cuda.amp.autocast(dtype=torch.float16):
             eps = pipe.unet(x, t_batch, encoder_hidden_states=enc).sample
 
-        step_out = noise_scheduler.step(eps, t, x, generator=generator)
+        step_out = noise_scheduler.step(eps, t, x)
         x = step_out.prev_sample
 
     return x
