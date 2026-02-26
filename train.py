@@ -227,7 +227,8 @@ def main(cfg_path: str):
     if cfg.get("eval", {}).get("enabled", False):
         fixed_batch = next(iter(dl))
     noise_scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
-
+    eval_scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
+    
     max_steps = int(cfg["train"]["max_steps"])
     log_every = int(cfg["train"]["log_every"])
     save_every = int(cfg["train"]["save_every"])
@@ -333,7 +334,7 @@ def main(cfg_path: str):
                     step=step,
                     run_dir=run_dir,
                     pipe=pipe,
-                    noise_scheduler=noise_scheduler,
+                    noise_scheduler=eval_scheduler,
                     pixel_values=q_pixel,
                     text_emb=q_text_emb,
                     id_cond=id_cond,
