@@ -62,21 +62,18 @@ class DualImageAttnProcessor(nn.Module):
             **kwargs
         )
 
-        # IMPORTANT: if both scales are zero — do nothing else
         if (self.scale_id == 0.0) and (self.scale_hair == 0.0):
             return base_out
 
         out_dtype = base_out.dtype
         result = base_out
 
-        # shared query (needed if any branch is active)
+        # shared query
         query = attn.to_q(hidden_states)
         query = attn.head_to_batch_dim(query)
         query_ = query.float() if self.attn_fp32 else query
 
-        # -------------------------
-        # ID branch (only if enabled)
-        # -------------------------
+        # ID branch
         if self.scale_id != 0.0:
             k_id = attn.head_to_batch_dim(self.to_k_id(id_states))
             v_id = attn.head_to_batch_dim(self.to_v_id(id_states))
@@ -93,9 +90,7 @@ class DualImageAttnProcessor(nn.Module):
 
             result = result + self.scale_id * out_id
 
-        # ---------------------------
-        # Hair branch (only if enabled)
-        # ---------------------------
+        # Hair branch
         if self.scale_hair != 0.0:
             k_h = attn.head_to_batch_dim(self.to_k_hair(hair_states))
             v_h = attn.head_to_batch_dim(self.to_v_hair(hair_states))
