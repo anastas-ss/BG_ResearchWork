@@ -4,10 +4,6 @@ import torch.nn as nn
 from transformers import CLIPVisionModel, CLIPImageProcessor
 
 class CLIPTokenConditioner(nn.Module):
-    """
-    Frozen CLIP vision -> pooled embedding -> trainable projection -> N tokens (cross_dim).
-    Designed so projection can be fp32 while CLIP can be fp16.
-    """
     def __init__(self, clip_vision_id: str, n_tokens: int, cross_dim: int, device="cuda", clip_dtype=torch.float16, proj_dtype=torch.float32):
         super().__init__()
         self.device = device
