@@ -3,8 +3,8 @@ exp_name: method1_clip_shortcut
 seed: 42
 
 data:
-  train_dir: /content/ffhq_sub/train
-  val_dir: /content/ffhq_sub/val
+  train_dir: /content/datasets/ffhq_sub/train
+  val_dir: /content/datasets/ffhq_sub/val
   image_size: 512
 
 models:
