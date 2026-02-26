@@ -1,3 +1,5 @@
+import torchvision
+from PIL import Image
 
 import argparse, os, time, json
 from pathlib import Path
@@ -14,7 +16,103 @@ from src.data.images import ImageFolderDataset
 from src.model.dual_ip_attention import DualImageAttnProcessor
 from src.model.clip_conditioner import CLIPTokenConditioner
 
+@torch.no_grad()
+def _vae_decode_to_01(pipe, latents, dtype_unet):
+    latents = latents.to(dtype_unet)
+    imgs = pipe.vae.decode(latents / pipe.vae.config.scaling_factor).sample  # [-1,1]
+    imgs_01 = (imgs.float() * 0.5 + 0.5).clamp(0, 1)  # fp32 [0,1]
+    return imgs_01
 
+@torch.no_grad()
+def _save_row(images_01: torch.Tensor, path: str):
+    """
+    images_01: (N,3,H,W) in [0,1]
+    Сохраняет одной строкой
+    """
+    grid = torchvision.utils.make_grid(images_01, nrow=images_01.shape[0])
+    torchvision.utils.save_image(grid, path)
+
+@torch.no_grad()
+def ddim_sample_with_enc(pipe, noise_scheduler, latents, enc, num_steps: int, generator: torch.Generator):
+    """
+    Мини-DDIM sampler на базе DDPM scheduler, но с set_timesteps (diffusers).
+    latents: (B,4,H/8,W/8) стартовый шум
+    enc: dict {"text":..., "id":..., "hair":...}
+    """
+    # инференсные таймстепы
+    noise_scheduler.set_timesteps(num_steps, device=latents.device)
+    x = latents
+
+    for t in noise_scheduler.timesteps:
+        # t в diffusers часто scalar tensor; unet ожидает batch timesteps
+        t_batch = torch.full((x.shape[0],), int(t), device=x.device, dtype=torch.long)
+        with torch.cuda.amp.autocast(dtype=torch.float16):
+            eps = pipe.unet(x, t_batch, encoder_hidden_states=enc).sample
+
+        step_out = noise_scheduler.step(eps, t, x, generator=generator)
+        x = step_out.prev_sample
+
+    return x
+
+@torch.no_grad()
+def qualitative_check(
+    *,
+    step: int,
+    run_dir,
+    pipe,
+    noise_scheduler,
+    pixel_values,     # (B,3,H,W) fp16 in [-1,1]
+    text_emb,         # (B,T,D)
+    id_cond,
+    hair_cond,
+    dtype_unet,
+    num_steps: int,
+    seed: int,
+):
+    out_dir = run_dir / "samples"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    B = pixel_values.shape[0]
+
+    # 1) готовим pil_images из pixel_values
+    imgs_01 = (pixel_values.float() * 0.5 + 0.5).clamp(0, 1)
+    pil_images = []
+    for i in range(B):
+        arr = (imgs_01[i].permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")
+        pil_images.append(Image.fromarray(arr))
+
+    # 2) токены условий
+    id_tokens = id_cond(pil_images, out_dtype=dtype_unet)
+    hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
+
+    # 3) фиксированный шум
+    gen = torch.Generator(device=pixel_values.device)
+    gen.manual_seed(int(seed))
+    latents0 = torch.randn((B, 4, pixel_values.shape[-2] // 8, pixel_values.shape[-1] // 8),
+                           device=pixel_values.device, dtype=dtype_unet, generator=gen)
+
+    # 4) 4 режима
+    variants = [
+        ("both_on",  id_tokens,                         hair_tokens),
+        ("id_only",  id_tokens,                         torch.zeros_like(hair_tokens)),
+        ("hair_only",torch.zeros_like(id_tokens),       hair_tokens),
+        ("both_off", torch.zeros_like(id_tokens),       torch.zeros_like(hair_tokens)),
+    ]
+
+    rows = []
+    for tag, id_t, hair_t in variants:
+        enc = {"text": text_emb, "id": id_t, "hair": hair_t}
+        lat = ddim_sample_with_enc(pipe, noise_scheduler, latents0.clone(), enc, num_steps=num_steps, generator=gen)
+        img_01 = _vae_decode_to_01(pipe, lat, dtype_unet)  # (B,3,H,W)
+        # если B>1, можно брать только первую картинку, чтобы сравнение было проще:
+        rows.append(img_01[:1])
+
+    # склеиваем 4 картинки в строку
+    row = torch.cat(rows, dim=0)  # (4,3,H,W)
+    path = out_dir / f"step_{step:07d}.png"
+    _save_row(row, str(path))
+    print(f"[qual] saved {path}")
+    
 def load_cfg(path: str):
     with open(path, "r") as f:
         return yaml.safe_load(f)
