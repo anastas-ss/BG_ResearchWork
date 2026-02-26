@@ -43,7 +43,7 @@ def main(cfg_path: str):
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=2))
     (run_dir / "config.yaml").write_text(Path(cfg_path).read_text())
 
-    # --- Load SD ---
+    # Load SD
     pipe = StableDiffusionPipeline.from_pretrained(
         cfg["models"]["sd_model_id"],
         torch_dtype=torch.float16,
@@ -55,7 +55,7 @@ def main(cfg_path: str):
     dtype_unet = next(unet.parameters()).dtype  # fp16
     cross_dim = unet.config.cross_attention_dim
 
-    # --- Install Dual processors on top of CLEAN base processors ---
+    # Install Dual processors on top of CLEAN base processors
     base_procs = unet.attn_processors
     attn_procs = {}
     n_cross = 0
@@ -67,7 +67,7 @@ def main(cfg_path: str):
                 m = getattr(m, key)
             hidden_size = m.to_q.in_features
 
-            # IMPORTANT: keep DualImageAttnProcessor in fp32 for stability
+            # keep DualImageAttnProcessor in fp32 for stability
             attn_procs[name] = DualImageAttnProcessor(
                 base_processor=base_proc,
                 hidden_size=hidden_size,
@@ -83,12 +83,12 @@ def main(cfg_path: str):
 
     unet.set_attn_processor(attn_procs)
 
-    # --- Freeze SD backbone ---
+    # Freeze SD backbone
     pipe.vae.requires_grad_(False)
     pipe.text_encoder.requires_grad_(False)
     pipe.unet.requires_grad_(False)
 
-    # --- Conditioners (Method 1: y1=y2=x) ---
+    # Conditioners (Method 1: y1=y2=x)
     n_tokens = int(cfg["cond"]["n_tokens"])
     clip_id = cfg["models"]["clip_vision_id"]
 
@@ -113,10 +113,10 @@ def main(cfg_path: str):
         weight_decay=float(cfg["train"]["weight_decay"]),
     )
 
-    # IMPORTANT: fp16 training -> use GradScaler
+    # fp16 training -> use GradScaler
     scaler = torch.cuda.amp.GradScaler(enabled=True)
 
-    # --- Data ---
+    # Data 
     ds = ImageFolderDataset(cfg["data"]["train_dir"], image_size=int(cfg["data"]["image_size"]))
     dl = DataLoader(
         ds,
@@ -166,9 +166,9 @@ def main(cfg_path: str):
         noise = torch.randn_like(latents)
         t = torch.randint(0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],), device=device).long()
         noisy = noise_scheduler.add_noise(latents, noise, t)
-        noisy = noisy.to(dtype=dtype_unet)  # IMPORTANT: match UNet dtype
+        noisy = noisy.to(dtype=dtype_unet) 
 
-        # Method 1 conditioning: use SAME image as both ID and Hair source
+        # Method 1 conditioning: use same image as both ID and Hair source
         with torch.no_grad():
             imgs_01 = (pixel_values.float() * 0.5 + 0.5).clamp(0, 1)  # fp32 [0,1]
 
@@ -182,14 +182,9 @@ def main(cfg_path: str):
         id_tokens = id_cond(pil_images, out_dtype=dtype_unet)
         hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
 
-        # Optional sanity checks (uncomment for debugging)
-        # assert torch.isfinite(id_tokens).all(), "id_tokens has NaN/Inf"
-        # assert torch.isfinite(hair_tokens).all(), "hair_tokens has NaN/Inf"
-        # assert torch.isfinite(text_emb).all(), "text_emb has NaN/Inf"
-
         enc = {"text": text_emb, "id": id_tokens, "hair": hair_tokens}
 
-        # ----- AMP + GradScaler training step -----
+        # AMP + GradScaler training step
         opt.zero_grad(set_to_none=True)
 
         with torch.cuda.amp.autocast(dtype=torch.float16):
@@ -205,7 +200,6 @@ def main(cfg_path: str):
         torch.nn.utils.clip_grad_norm_(train_params, 1.0)
         scaler.step(opt)
         scaler.update()
-        # -----------------------------------------
 
         step += 1
 
