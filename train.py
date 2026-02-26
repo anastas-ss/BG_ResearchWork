@@ -321,7 +321,14 @@ def main(cfg_path: str):
         
                 with torch.no_grad():
                     q_text_emb = pipe.text_encoder(**q_tok).last_hidden_state.to(dtype_unet)
-        
+                # switch to eval for sampling
+                was_unet_train = unet.training
+                was_id_train = id_cond.training
+                was_hair_train = hair_cond.training
+                unet.eval()
+                id_cond.eval()
+                hair_cond.eval()
+
                 qualitative_check(
                     step=step,
                     run_dir=run_dir,
@@ -335,6 +342,11 @@ def main(cfg_path: str):
                     num_steps=int(cfg["eval"].get("num_inference_steps", 30)),
                     seed=int(cfg["eval"].get("seed", 123)),
                 )
+                # restore train modes
+                if was_unet_train: unet.train()
+                if was_id_train: id_cond.train()
+                if was_hair_train: hair_cond.train()
+                    
         if step % save_every == 0 or step == max_steps:
             ckpt = {
                 "step": step,
