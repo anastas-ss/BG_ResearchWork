@@ -32,7 +32,7 @@ def main(cfg_path: str):
     run_dir = Path("runs") / exp_name
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save config + env info for reproducibility
+    # Save config + env info
     meta = {
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "seed": seed,
@@ -55,7 +55,6 @@ def main(cfg_path: str):
     dtype_unet = next(unet.parameters()).dtype  # fp16
     cross_dim = unet.config.cross_attention_dim
 
-    # Install Dual processors on top of CLEAN base processors
     base_procs = unet.attn_processors
     attn_procs = {}
     n_cross = 0
@@ -67,7 +66,7 @@ def main(cfg_path: str):
                 m = getattr(m, key)
             hidden_size = m.to_q.in_features
 
-            # keep DualImageAttnProcessor in fp32 for stability
+            # keep DualImageAttnProcessor in fp32
             attn_procs[name] = DualImageAttnProcessor(
                 base_processor=base_proc,
                 hidden_size=hidden_size,
