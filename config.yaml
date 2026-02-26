@@ -19,14 +19,14 @@ models:
 
 cond:
   n_tokens: 4
-  scale_id: 1.0
-  scale_hair: 1.0
+  scale_id: 2.0
+  scale_hair: 2.0
 
 train:
   batch_size: 1
   lr: 5e-5
   weight_decay: 0.0
-  max_steps: 2000
+  max_steps: 5000
   log_every: 25
   save_every: 500
   mixed_precision: fp16
