@@ -222,7 +222,10 @@ def main(cfg_path: str):
         num_workers=2,
         pin_memory=True,
     )
-
+    # fixed batch for qualitative check
+    fixed_batch = None
+    if cfg.get("eval", {}).get("enabled", False):
+        fixed_batch = next(iter(dl))
     noise_scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
 
     max_steps = int(cfg["train"]["max_steps"])
@@ -302,7 +305,37 @@ def main(cfg_path: str):
 
         if step % log_every == 0:
             print(f"[step {step}/{max_steps}] loss={loss.item():.6f}")
-
+        # qualitative sampling check
+        if cfg.get("eval", {}).get("enabled", False):
+            every = int(cfg["eval"].get("every_steps", 200))
+            if step % every == 0:
+                qb = fixed_batch if fixed_batch is not None else batch
+                q_pixel = qb["pixel_values"].to(device=device, dtype=dtype_unet)
+        
+                # text emb for the fixed batch
+                q_tok = pipe.tokenizer(
+                    [""] * q_pixel.shape[0],
+                    padding="max_length",
+                    max_length=pipe.tokenizer.model_max_length,
+                    return_tensors="pt",
+                ).to(device)
+        
+                with torch.no_grad():
+                    q_text_emb = pipe.text_encoder(**q_tok).last_hidden_state.to(dtype_unet)
+        
+                qualitative_check(
+                    step=step,
+                    run_dir=run_dir,
+                    pipe=pipe,
+                    noise_scheduler=noise_scheduler,
+                    pixel_values=q_pixel,
+                    text_emb=q_text_emb,
+                    id_cond=id_cond,
+                    hair_cond=hair_cond,
+                    dtype_unet=dtype_unet,
+                    num_steps=int(cfg["eval"].get("num_inference_steps", 30)),
+                    seed=int(cfg["eval"].get("seed", 123)),
+                )
         if step % save_every == 0 or step == max_steps:
             ckpt = {
                 "step": step,
