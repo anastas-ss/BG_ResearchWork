@@ -273,7 +273,6 @@ def main(cfg_path: str):
             imgs_01 = (pixel_values.float() * 0.5 + 0.5).clamp(0, 1)  # fp32 [0,1]
 
         pil_images = []
-        from PIL import Image
 
         for i in range(imgs_01.shape[0]):
             arr = (imgs_01[i].permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")
