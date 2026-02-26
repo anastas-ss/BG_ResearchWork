@@ -313,7 +313,7 @@ def main(cfg_path: str):
         
                 # text emb for the fixed batch
                 q_tok = pipe.tokenizer(
-                    [""] * q_pixel.shape[0],
+                    ["a portrait photo of a person"] * q_pixel.shape[0],
                     padding="max_length",
                     max_length=pipe.tokenizer.model_max_length,
                     return_tensors="pt",
