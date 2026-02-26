@@ -27,7 +27,6 @@ def _vae_decode_to_01(pipe, latents, dtype_unet):
 def _save_row(images_01: torch.Tensor, path: str):
     """
     images_01: (N,3,H,W) in [0,1]
-    Сохраняет одной строкой
     """
     grid = torchvision.utils.make_grid(images_01, nrow=images_01.shape[0])
     torchvision.utils.save_image(grid, path)
@@ -248,9 +247,9 @@ def main(cfg_path: str):
 
         pixel_values = batch["pixel_values"].to(device=device, dtype=dtype_unet)  # [B,3,H,W] fp16
 
-        # text emb (empty prompt)
+        # text emb (prompt)
         tok = pipe.tokenizer(
-            [""] * pixel_values.shape[0],
+            ["a portrait photo of a person"] * pixel_values.shape[0],
             padding="max_length",
             max_length=pipe.tokenizer.model_max_length,
             return_tensors="pt",
