@@ -35,7 +35,21 @@ from src.model.dual_ip_attention import DualImageAttnProcessor
 from src.model.id_conditioner_insightface import IDArcFaceConditioner
 from src.model.hair_conditioner_parsing import HairConditioner
 
-
+def _maybe_display(path: str):
+    try:
+        from IPython.display import display
+        from PIL import Image
+        display(Image.open(path))
+    except Exception as e:
+        print(f"[qual] (display skipped) {e}")
+def _print_png_base64(path: str, max_kb: int = 800):
+    import base64
+    data = open(path, "rb").read()
+    if len(data) > max_kb * 1024:
+        print(f"[qual] png too big ({len(data)/1024:.1f} KB), not printing base64")
+        return
+    b64 = base64.b64encode(data).decode("utf-8")
+    print("data:image/png;base64," + b64)
 # -------------------------
 # Data collation (keep PIL)
 # -------------------------
@@ -161,6 +175,8 @@ def qualitative_check(
     path = out_dir / f"step_{step:07d}.png"
     _save_row(row, str(path))
     print(f"[qual] saved {path}")
+    _maybe_display(str(path))
+    _print_png_base64(str(path), max_kb=800)
 
 
 # -------------------------
