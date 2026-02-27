@@ -6,7 +6,7 @@ eval:
   enabled: true
   every_steps: 200
   seed: 123
-  num_inference_steps: 30
+  num_inference_steps: 50
 
 data:
   train_dir: /content/datasets/ffhq_sub/train
