@@ -41,14 +41,32 @@ class HairSegmentationEncoder(nn.Module):
 
     @torch.no_grad()
     def forward(self, pil_images):
-        masks = []
+        """
+        pil_images: list[PIL.Image], len=B
+        return: masks float tensor (B, 512, 512) with values {0,1}
+        """
+        # 1) собрать батч (B,3,512,512)
+        xs = []
         for im in pil_images:
-            x = self.tf(im.convert("RGB")).unsqueeze(0).to(self.device)  # (1,3,512,512)
-            logits = self.net(x)[0]  # (1,19,512,512) или (1,19,...) в зависимости от реализации
-            parsing = logits.argmax(dim=1)[0]  # (512,512)
-            hair = (parsing == self.hair_class).float()  # (512,512)
-            masks.append(hair)
-        return torch.stack(masks, dim=0)  # (B,512,512)
+            x = self.tf(im.convert("RGB"))  # (3,512,512) float
+            xs.append(x)
+        x = torch.stack(xs, dim=0).to(self.device)  # (B,3,512,512)
+    
+        # 2) forward BiSeNet
+        out = self.net(x)
+    
+        # В твоём bisenet.py return (out, out16, out32)
+        # но на всякий случай поддержим оба варианта:
+        if isinstance(out, (tuple, list)):
+            logits = out[0]
+        else:
+            logits = out
+    
+        # logits: (B,19,512,512)
+        parsing = logits.argmax(dim=1)  # (B,512,512) int64
+        hair = (parsing == self.hair_class).float()  # (B,512,512) float {0,1}
+    
+        return hair
 
 
 def apply_mask_to_pil(pil: Image.Image, mask_512: torch.Tensor, bg=0):
