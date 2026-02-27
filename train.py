@@ -14,7 +14,8 @@ from diffusers import StableDiffusionPipeline, DDPMScheduler
 from src.utils.repro import set_seed
 from src.data.images import ImageFolderDataset
 from src.model.dual_ip_attention import DualImageAttnProcessor
-from src.model.clip_conditioner import CLIPTokenConditioner
+from src.model.id_conditioner_insightface import IDArcFaceConditioner
+from src.model.hair_conditioner_parsing import HairConditioner
 
 def collate_keep_pil(batch_list):
     pixel_values = torch.stack([b["pixel_values"] for b in batch_list], dim=0)
@@ -87,9 +88,27 @@ def qualitative_check(
         pil_images.append(Image.fromarray(arr))
 
     # 2) токены условий
-    id_tokens = id_cond(pil_images, out_dtype=dtype_unet)
-    hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
-
+    n_tokens = int(cfg["cond"]["n_tokens"])
+    clip_id = cfg["models"]["clip_vision_id"]
+    hair_w = cfg["models"]["hair_parsing_weights"]  # путь к .pth
+    
+    id_cond = IDArcFaceConditioner(
+        n_tokens=n_tokens,
+        cross_dim=cross_dim,
+        device=device,
+        proj_dtype=torch.float32,
+    )
+    
+    hair_cond = HairConditioner(
+        clip_vision_id=clip_id,
+        n_tokens=n_tokens,
+        cross_dim=cross_dim,
+        hair_weights_path=hair_w,
+        device=device,
+        clip_dtype=torch.float16,
+        proj_dtype=torch.float32,
+        bg_value=float(cfg["cond"].get("hair_bg_value", 0.0)),
+    )
     # 3) фиксированный шум
     gen = torch.Generator(device=pixel_values.device)
     gen.manual_seed(int(seed))
@@ -193,12 +212,24 @@ def main(cfg_path: str):
     # Conditioners (Method 1: y1=y2=x)
     n_tokens = int(cfg["cond"]["n_tokens"])
     clip_id = cfg["models"]["clip_vision_id"]
-
-    id_cond = CLIPTokenConditioner(
-        clip_id, n_tokens, cross_dim, device=device, clip_dtype=torch.float16, proj_dtype=torch.float32
+    hair_w = cfg["models"]["hair_parsing_weights"]  # путь к .pth
+    
+    id_cond = IDArcFaceConditioner(
+        n_tokens=n_tokens,
+        cross_dim=cross_dim,
+        device=device,
+        proj_dtype=torch.float32,
     )
-    hair_cond = CLIPTokenConditioner(
-        clip_id, n_tokens, cross_dim, device=device, clip_dtype=torch.float16, proj_dtype=torch.float32
+    
+    hair_cond = HairConditioner(
+        clip_vision_id=clip_id,
+        n_tokens=n_tokens,
+        cross_dim=cross_dim,
+        hair_weights_path=hair_w,
+        device=device,
+        clip_dtype=torch.float16,
+        proj_dtype=torch.float32,
+        bg_value=float(cfg["cond"].get("hair_bg_value", 0.0)),
     )
 
     # Trainable params: projections + dual K/V
