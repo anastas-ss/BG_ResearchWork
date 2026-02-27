@@ -118,7 +118,7 @@ def qualitative_check(
     step: int,
     run_dir: Path,
     pipe: StableDiffusionPipeline,
-    noise_scheduler: DDPMScheduler,
+    scheduler,
     pixel_values: torch.Tensor,  # [B,3,H,W] in [-1,1] (dtype_unet)
     pil_images,                  # list[PIL]
     text_emb: torch.Tensor,      # [B,T,D] (dtype_unet)
@@ -176,7 +176,7 @@ def qualitative_check(
         
         lat = sample_with_cfg(
             pipe=pipe,
-            scheduler=noise_scheduler,
+            scheduler=scheduler,
             latents=latents0.clone(),
             enc_cond=enc_cond,
             enc_uncond=enc_uncond,
@@ -191,7 +191,6 @@ def qualitative_check(
     _save_row(row, str(path))
     print(f"[qual] saved {path}")
     _maybe_display(str(path))
-    _print_png_base64(str(path), max_kb=800)
 
 
 # -------------------------
@@ -333,7 +332,8 @@ def main(cfg_path: str):
         fixed_batch = next(iter(dl))
 
     # Scheduler for training noise / for eval sampling
-    noise_scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
+    
+    scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
     eval_scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
     max_steps = int(cfg["train"]["max_steps"])
     log_every = int(cfg["train"]["log_every"])
@@ -379,9 +379,9 @@ def main(cfg_path: str):
         # ---- Add diffusion noise
         noise = torch.randn_like(latents)
         t = torch.randint(
-            0, noise_scheduler.config.num_train_timesteps, (B,), device=device
+            0, scheduler.config.num_train_timesteps, (B,), device=device
         ).long()
-        noisy = noise_scheduler.add_noise(latents, noise, t).to(dtype=dtype_unet)
+        noisy = scheduler.add_noise(latents, noise, t).to(dtype=dtype_unet)
 
         # ---- Conditioning tokens (from PIL)
         id_tokens = id_cond(pil_images, out_dtype=dtype_unet)
@@ -442,7 +442,7 @@ def main(cfg_path: str):
                     step=step,
                     run_dir=run_dir,
                     pipe=pipe,
-                    noise_scheduler=eval_scheduler,
+                    scheduler=eval_scheduler,
                     pixel_values=q_pixel,
                     pil_images=q_pil,
                     text_emb=q_text_emb,
