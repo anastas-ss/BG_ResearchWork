@@ -87,32 +87,27 @@ def _save_row(images_01: torch.Tensor, path: str):
 
 
 @torch.no_grad()
-def ddim_sample_with_enc(
-    pipe: StableDiffusionPipeline,
-    noise_scheduler: DDPMScheduler,
-    latents: torch.Tensor,
-    enc: dict,
+def sample_with_cfg(
+    pipe,
+    scheduler,
+    latents,
+    enc_cond: dict,
+    enc_uncond: dict,
     num_steps: int,
+    cfg_scale: float = 7.0,
 ):
-    """
-    Minimal sampler using DDPMScheduler timesteps + step().
-    (Not "true DDIM", but OK for qualitative comparisons.)
-
-    latents: start noise [B,4,h,w]
-    enc: {"text": ..., "id": ..., "hair": ...}  (dict consumed by DualImageAttnProcessor)
-    """
-    noise_scheduler.set_timesteps(num_steps, device=latents.device)
+    scheduler.set_timesteps(num_steps, device=latents.device)
     x = latents
 
-    for t in noise_scheduler.timesteps:
-        # UNet expects batch timesteps
+    for t in scheduler.timesteps:
         t_batch = torch.full((x.shape[0],), int(t), device=x.device, dtype=torch.long)
 
         with torch.cuda.amp.autocast(dtype=torch.float16):
-            eps = pipe.unet(x, t_batch, encoder_hidden_states=enc).sample
+            eps_u = pipe.unet(x, t_batch, encoder_hidden_states=enc_uncond).sample
+            eps_c = pipe.unet(x, t_batch, encoder_hidden_states=enc_cond).sample
 
-        step_out = noise_scheduler.step(eps, t, x)
-        x = step_out.prev_sample
+        eps = eps_u + cfg_scale * (eps_c - eps_u)
+        x = scheduler.step(eps, t, x).prev_sample
 
     return x
 
@@ -164,11 +159,30 @@ def qualitative_check(
         ("hair_only", torch.zeros_like(id_tokens),  hair_tokens),
         ("both_off",  torch.zeros_like(id_tokens),  torch.zeros_like(hair_tokens)),
     ]
+    # unconditional text (для CFG)
+    tok_uc = pipe.tokenizer(
+        [""] * B,
+        padding="max_length",
+        max_length=pipe.tokenizer.model_max_length,
+        return_tensors="pt",
+    ).to(pixel_values.device)
 
+    with torch.no_grad():
+        text_emb_uc = pipe.text_encoder(**tok_uc).last_hidden_state.to(dtype_unet)
     rows = []
     for tag, id_t, hair_t in variants:
-        enc = {"text": text_emb, "id": id_t, "hair": hair_t}
-        lat = ddim_sample_with_enc(pipe, noise_scheduler, latents0.clone(), enc, num_steps=num_steps)
+        enc_cond   = {"text": text_emb,    "id": id_t, "hair": hair_t}
+        enc_uncond = {"text": text_emb_uc, "id": torch.zeros_like(id_t), "hair": torch.zeros_like(hair_t)}
+        
+        lat = sample_with_cfg(
+            pipe=pipe,
+            scheduler=noise_scheduler,
+            latents=latents0.clone(),
+            enc_cond=enc_cond,
+            enc_uncond=enc_uncond,
+            num_steps=num_steps,
+            cfg_scale=float(7.0),   # можно вынести в cfg
+        )
         img_01 = _vae_decode_to_01(pipe, lat, dtype_unet)  # [B,3,H,W]
         rows.append(img_01[:1])  # take first for a clean 4-up compare
 
