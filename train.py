@@ -449,7 +449,7 @@ def main(cfg_path: str):
                     id_cond=id_cond,
                     hair_cond=hair_cond,
                     dtype_unet=dtype_unet,
-                    num_steps=int(cfg["eval"].get("num_inference_steps", 30)),
+                    num_steps=int(cfg["eval"].get("num_inference_steps", 50)),
                     seed=int(cfg["eval"].get("seed", 123)),
                 )
 
