@@ -23,7 +23,8 @@ class HairSegmentationEncoder(nn.Module):
         super().__init__()
         self.device = device
         self.net = BiSeNet(n_classes=19).to(device).eval()
-
+        self.enc_h = HairSegmentationEncoder(hair_weights_path, device=device, hair_class=hair_class)
+        
         sd = torch.load(weights_path, map_location="cpu")
 
         # 1) распаковываем разные форматы чекпойнта
@@ -121,7 +122,7 @@ class HairConditioner(nn.Module):
         self.bg_value = float(bg_value)
 
         # Enc_H
-        self.enc_h = HairSegmentationEncoder(hair_weights_path, device=device)
+        self.enc_h = HairSegmentationEncoder(hair_weights_path, device=device, hair_class=hair_class)
 
         # F(): CLIPVision pooled
         self.clip = CLIPVisionModel.from_pretrained(clip_vision_id, torch_dtype=clip_dtype).to(device).eval()
