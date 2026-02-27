@@ -19,12 +19,28 @@ class HairSegmentationEncoder(nn.Module):
     """
     Enc_H: PIL -> hair mask (binary)
     """
-    def __init__(self, weights_path: str, device="cuda"):
+    def __init__(self, weights_path: str, device="cuda", hair_class: int = 13):
         super().__init__()
         self.device = device
         self.net = BiSeNet(n_classes=19).to(device).eval()
-        sd = torch.load(weights_path, map_location=device)
-        self.net.load_state_dict(sd, strict=True)
+
+        sd = torch.load(weights_path, map_location="cpu")
+
+        # 1) распаковываем разные форматы чекпойнта
+        if isinstance(sd, dict) and "state_dict" in sd:
+            sd = sd["state_dict"]
+
+        # 2) убираем префикс module. если веса от DataParallel
+        if isinstance(sd, dict):
+            sd = {k.replace("module.", ""): v for k, v in sd.items()}
+
+        missing, unexpected = self.net.load_state_dict(sd, strict=False)
+        if len(missing) or len(unexpected):
+            print("[HairSegEnc] load_state_dict strict=False")
+            if len(missing):
+                print("  missing keys:", missing[:10], "... total:", len(missing))
+            if len(unexpected):
+                print("  unexpected keys:", unexpected[:10], "... total:", len(unexpected))
 
         for p in self.net.parameters():
             p.requires_grad = False
@@ -36,8 +52,8 @@ class HairSegmentationEncoder(nn.Module):
                         [0.229, 0.224, 0.225]),
         ])
 
-        # Для самых популярных весов face-parsing.PyTorch: hair = 17.
-        self.hair_class = 17
+        # ВАЖНО: это зависит от весов, не от FFHQ
+        self.hair_class = int(hair_class)
 
     @torch.no_grad()
     def forward(self, pil_images):
@@ -46,26 +62,22 @@ class HairSegmentationEncoder(nn.Module):
         return: masks float tensor (B, 512, 512) with values {0,1}
         """
         # 1) собрать батч (B,3,512,512)
-        xs = []
-        for im in pil_images:
-            x = self.tf(im.convert("RGB"))  # (3,512,512) float
-            xs.append(x)
+        xs = [self.tf(im.convert("RGB")) for im in pil_images]
         x = torch.stack(xs, dim=0).to(self.device)  # (B,3,512,512)
-    
+
         # 2) forward BiSeNet
         out = self.net(x)
-    
-        # В твоём bisenet.py return (out, out16, out32)
-        # но на всякий случай поддержим оба варианта:
-        if isinstance(out, (tuple, list)):
-            logits = out[0]
-        else:
-            logits = out
-    
-        # logits: (B,19,512,512)
-        parsing = logits.argmax(dim=1)  # (B,512,512) int64
-        hair = (parsing == self.hair_class).float()  # (B,512,512) float {0,1}
-    
+        logits = out[0] if isinstance(out, (tuple, list)) else out  # (B,19,512,512)
+
+        parsing = logits.argmax(dim=1)  # (B,512,512)
+        hair = (parsing == self.hair_class).float()  # (B,512,512)
+
+        # 3) лёгкая морфология (чуть чище маска)
+        # дилатация: (B,1,H,W) -> maxpool
+        h = hair.unsqueeze(1)
+        h = torch.nn.functional.max_pool2d(h, kernel_size=3, stride=1, padding=1)
+        hair = h[:, 0]
+
         return hair
 
 
