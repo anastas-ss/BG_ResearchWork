@@ -22,39 +22,72 @@ class HairSegmentationEncoder(nn.Module):
         self.net = BiSeNet(n_classes=19).to(device).eval()
 
         sd = torch.load(weights_path, map_location="cpu")
-        if isinstance(sd, dict) and "state_dict" in sd:
-            sd = sd["state_dict"]
+        if isinstance(sd, dict):
+            for key in ("state_dict", "model", "net", "params"):
+                if key in sd and isinstance(sd[key], dict):
+                    sd = sd[key]
+                    break
 
-        if isinstance(sd, dict):
-            sd = {k.replace("module.", ""): v for k, v in sd.items()}
-        if isinstance(sd, dict):
+        if not isinstance(sd, dict):
+            raise ValueError(f"Unsupported weights format: {type(sd)}")
+
         # 1) убрать DataParallel префикс
         sd = {k.replace("module.", ""): v for k, v in sd.items()}
-    
-        # 2) ремап ключей из популярных весов BiSeNet face-parsing:
-        #    cp.resnet.*  -> cp.backbone.*
-        #    cp.backbone.conv1.weight -> cp.backbone.conv1.0.weight
-        #    cp.backbone.bn1.* -> cp.backbone.conv1.1.*
-        remapped = {}
-        for k, v in sd.items():
+        sd = {k: v for k, v in sd.items() if isinstance(v, torch.Tensor)}
+        
+        def _remap_key(k: str) -> str:
             nk = k
-    
-            # a) в некоторых репо backbone называется resnet
+
+            # ---- A) нормализуем возможные префиксы backbone ----
+            # варианты из разных репо:
+            #   cp.resnet.*       -> cp.backbone.*
+            #   cp.backbone.*     -> cp.backbone.* (как есть)
+            #   resnet.*          -> cp.backbone.*
+            #   backbone.*        -> cp.backbone.*
+            # иногда ключи начинаются с "model." или "bisenet."
+        for prefix in ("model.", "bisenet.", "net."):
+            if nk.startswith(prefix):
+                nk = nk[len(prefix):]
+        
+        # некоторые репо называют контекстный путь так:
+        # context_path.resnet.* -> cp.backbone.*
+        if nk.startswith("context_path.resnet."):
+            nk = "cp.backbone." + nk[len("context_path.resnet."):]
+        elif nk.startswith("context_path.backbone."):
+            nk = "cp.backbone." + nk[len("context_path.backbone."):]
             if nk.startswith("cp.resnet."):
                 nk = "cp.backbone." + nk[len("cp.resnet."):]
-    
-            # b) у тебя conv1 это Sequential(conv,bn,relu)
-            #    а в весах обычно resnet.conv1 + resnet.bn1 отдельно
+            elif nk.startswith("resnet."):
+                nk = "cp.backbone." + nk[len("resnet."):]
+            elif nk.startswith("backbone."):
+                nk = "cp.backbone." + nk[len("backbone."):]
+            # иногда встречается "context_path.resnet." и т.п. — можно расширить позже, если попадётся
+
+            # ---- B) привести conv1/bn1 к твоей структуре ----
+            # у тебя: cp.backbone.conv1 = Sequential(conv,bn,relu)
+            # в весах обычно: conv1 + bn1 отдельными слоями
             if nk == "cp.backbone.conv1.weight":
                 nk = "cp.backbone.conv1.0.weight"
-    
+
+            # bn1.* -> conv1.1.*
             if nk.startswith("cp.backbone.bn1."):
                 nk = "cp.backbone.conv1.1." + nk[len("cp.backbone.bn1."):]
-    
-            # c) иногда в весах есть num_batches_tracked — можно оставить, strict=False переживёт
-            remapped[nk] = v
-    
+
+            # иногда bn1 лежит как "cp.backbone.conv1.1.*" уже — оставляем как есть
+
+            # ---- C) выкинуть мусорные/ненужные ключи (необязательно, но уменьшает шум) ----
+            # num_batches_tracked часто есть в BatchNorm и не мешает, но можно оставить.
+            # НИЧЕГО не удаляем — strict=False и так переживёт.
+
+            return nk
+
+        # 2) применить ремап
+        remapped = {}
+        for k, v in sd.items():
+            remapped[_remap_key(k)] = v
         sd = remapped
+
+        # 3) загрузить
         missing, unexpected = self.net.load_state_dict(sd, strict=False)
         if len(missing) or len(unexpected):
             print("[HairSegEnc] load_state_dict strict=False")
