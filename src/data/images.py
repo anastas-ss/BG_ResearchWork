@@ -30,9 +30,11 @@ class ImageFolderDataset(Dataset):
 
     def __getitem__(self, idx):
         p = self.paths[idx]
-        img = Image.open(p).convert("RGB")
-        x = self.tf(img)  # [3,H,W] float
+        pil = Image.open(p).convert("RGB")
+        x = self.tf(pil)  # [-1,1]
+    
         return {
             "pixel_values": x,
+            "pil": pil,
             "path": str(p),
         }
