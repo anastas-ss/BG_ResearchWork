@@ -16,11 +16,13 @@ data:
 models:
   sd_model_id: runwayml/stable-diffusion-v1-5
   clip_vision_id: openai/clip-vit-large-patch14
+  hair_parsing_weights: /content/weights/79999_iter.pth   # пример: положишь сюда
 
 cond:
   n_tokens: 4
-  scale_id: 2.0
-  scale_hair: 2.0
+  scale_id: 1.0
+  scale_hair: 1.0
+  hair_bg_value: 0.0
 
 train:
   batch_size: 2
