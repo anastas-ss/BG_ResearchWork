@@ -37,48 +37,32 @@ class HairSegmentationEncoder(nn.Module):
         
         def _remap_key(k: str) -> str:
             nk = k
-
-            # ---- A) нормализуем возможные префиксы backbone ----
-            # варианты из разных репо:
-            #   cp.resnet.*       -> cp.backbone.*
-            #   cp.backbone.*     -> cp.backbone.* (как есть)
-            #   resnet.*          -> cp.backbone.*
-            #   backbone.*        -> cp.backbone.*
-            # иногда ключи начинаются с "model." или "bisenet."
-        for prefix in ("model.", "bisenet.", "net."):
-            if nk.startswith(prefix):
-                nk = nk[len(prefix):]
         
-        # некоторые репо называют контекстный путь так:
-        # context_path.resnet.* -> cp.backbone.*
-        if nk.startswith("context_path.resnet."):
-            nk = "cp.backbone." + nk[len("context_path.resnet."):]
-        elif nk.startswith("context_path.backbone."):
-            nk = "cp.backbone." + nk[len("context_path.backbone."):]
+            # 0) убрать частые верхние префиксы (разные repo сохраняют как model./net./bisenet.)
+            for prefix in ("model.", "bisenet.", "net."):
+                if nk.startswith(prefix):
+                    nk = nk[len(prefix):]
+        
+            # A) нормализуем backbone / context_path
+            if nk.startswith("context_path.resnet."):
+                nk = "cp.backbone." + nk[len("context_path.resnet."):]
+            elif nk.startswith("context_path.backbone."):
+                nk = "cp.backbone." + nk[len("context_path.backbone."):]
+        
             if nk.startswith("cp.resnet."):
                 nk = "cp.backbone." + nk[len("cp.resnet."):]
             elif nk.startswith("resnet."):
                 nk = "cp.backbone." + nk[len("resnet."):]
             elif nk.startswith("backbone."):
                 nk = "cp.backbone." + nk[len("backbone."):]
-            # иногда встречается "context_path.resnet." и т.п. — можно расширить позже, если попадётся
-
-            # ---- B) привести conv1/bn1 к твоей структуре ----
-            # у тебя: cp.backbone.conv1 = Sequential(conv,bn,relu)
-            # в весах обычно: conv1 + bn1 отдельными слоями
+        
+            # B) привести conv1/bn1 к твоей структуре (Sequential(conv,bn,relu))
             if nk == "cp.backbone.conv1.weight":
                 nk = "cp.backbone.conv1.0.weight"
-
-            # bn1.* -> conv1.1.*
+        
             if nk.startswith("cp.backbone.bn1."):
                 nk = "cp.backbone.conv1.1." + nk[len("cp.backbone.bn1."):]
-
-            # иногда bn1 лежит как "cp.backbone.conv1.1.*" уже — оставляем как есть
-
-            # ---- C) выкинуть мусорные/ненужные ключи (необязательно, но уменьшает шум) ----
-            # num_batches_tracked часто есть в BatchNorm и не мешает, но можно оставить.
-            # НИЧЕГО не удаляем — strict=False и так переживёт.
-
+        
             return nk
 
         # 2) применить ремап
