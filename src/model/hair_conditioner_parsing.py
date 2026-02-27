@@ -27,7 +27,34 @@ class HairSegmentationEncoder(nn.Module):
 
         if isinstance(sd, dict):
             sd = {k.replace("module.", ""): v for k, v in sd.items()}
-
+        if isinstance(sd, dict):
+        # 1) убрать DataParallel префикс
+        sd = {k.replace("module.", ""): v for k, v in sd.items()}
+    
+        # 2) ремап ключей из популярных весов BiSeNet face-parsing:
+        #    cp.resnet.*  -> cp.backbone.*
+        #    cp.backbone.conv1.weight -> cp.backbone.conv1.0.weight
+        #    cp.backbone.bn1.* -> cp.backbone.conv1.1.*
+        remapped = {}
+        for k, v in sd.items():
+            nk = k
+    
+            # a) в некоторых репо backbone называется resnet
+            if nk.startswith("cp.resnet."):
+                nk = "cp.backbone." + nk[len("cp.resnet."):]
+    
+            # b) у тебя conv1 это Sequential(conv,bn,relu)
+            #    а в весах обычно resnet.conv1 + resnet.bn1 отдельно
+            if nk == "cp.backbone.conv1.weight":
+                nk = "cp.backbone.conv1.0.weight"
+    
+            if nk.startswith("cp.backbone.bn1."):
+                nk = "cp.backbone.conv1.1." + nk[len("cp.backbone.bn1."):]
+    
+            # c) иногда в весах есть num_batches_tracked — можно оставить, strict=False переживёт
+            remapped[nk] = v
+    
+        sd = remapped
         missing, unexpected = self.net.load_state_dict(sd, strict=False)
         if len(missing) or len(unexpected):
             print("[HairSegEnc] load_state_dict strict=False")
