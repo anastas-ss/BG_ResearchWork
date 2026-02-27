@@ -23,6 +23,7 @@ cond:
   scale_id: 1.0
   scale_hair: 1.0
   hair_bg_value: 0.0
+  hair_class: 13
 
 train:
   batch_size: 2
