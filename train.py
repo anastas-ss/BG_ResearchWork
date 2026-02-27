@@ -28,6 +28,7 @@ import yaml
 import torchvision
 
 from diffusers import StableDiffusionPipeline, DDPMScheduler
+from diffusers import DPMSolverMultistepScheduler
 
 from src.utils.repro import set_seed
 from src.data.images import ImageFolderDataset
@@ -319,8 +320,7 @@ def main(cfg_path: str):
 
     # Scheduler for training noise / for eval sampling
     noise_scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
-    eval_scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
-
+    eval_scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
     max_steps = int(cfg["train"]["max_steps"])
     log_every = int(cfg["train"]["log_every"])
     save_every = int(cfg["train"]["save_every"])
