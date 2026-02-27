@@ -16,6 +16,12 @@ from src.data.images import ImageFolderDataset
 from src.model.dual_ip_attention import DualImageAttnProcessor
 from src.model.clip_conditioner import CLIPTokenConditioner
 
+def collate_keep_pil(batch_list):
+    pixel_values = torch.stack([b["pixel_values"] for b in batch_list], dim=0)
+    pil = [b["pil"] for b in batch_list]
+    path = [b["path"] for b in batch_list]
+    return {"pixel_values": pixel_values, "pil": pil, "path": path}
+    
 @torch.no_grad()
 def _vae_decode_to_01(pipe, latents, dtype_unet):
     latents = latents.to(dtype_unet)
@@ -220,6 +226,7 @@ def main(cfg_path: str):
         shuffle=True,
         num_workers=2,
         pin_memory=True,
+        collate_fn=collate_keep_pil,
     )
     # fixed batch for qualitative check
     fixed_batch = None
