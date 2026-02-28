@@ -37,7 +37,7 @@ class InsightFaceArcFaceEmbedder:
 
 class IDArcFaceConditioner(nn.Module):
     """
-    ID shortcut ветка как на схеме:
+    ID shortcut ветка:
     y1 -> (det+align+ArcFace) -> f_id -> proj -> tokens -> в cross-attn
     """
     def __init__(
