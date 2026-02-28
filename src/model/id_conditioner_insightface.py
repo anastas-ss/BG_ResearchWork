@@ -9,11 +9,11 @@ from insightface.app import FaceAnalysis
 
 class InsightFaceArcFaceEmbedder:
     """
-    Детектор+ArcFace эмбеддинг. Возвращает emb размерности 512 (обычно).
+    Детектор+ArcFace эмбеддинг. Возвращает emb размерности 512
     """
     def __init__(self, device: str = "cuda", det_size=(640, 640)):
         ctx_id = 0 if device.startswith("cuda") else -1
-        self.app = FaceAnalysis(name="buffalo_l")  # популярный пакет: det+rec
+        self.app = FaceAnalysis(name="buffalo_l")  
         self.app.prepare(ctx_id=ctx_id, det_size=det_size)
 
     def __call__(self, pil_images):
