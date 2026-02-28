@@ -8,31 +8,45 @@ from insightface.app import FaceAnalysis
 
 
 class InsightFaceArcFaceEmbedder:
-    """
-    Детектор+ArcFace эмбеддинг. Возвращает emb размерности 512
-    """
-    def __init__(self, device: str = "cuda", det_size=(640, 640)):
+    def __init__(self, device="cuda", det_sizes=((640,640),(512,512),(768,768),(896,896))):
         ctx_id = 0 if device.startswith("cuda") else -1
-        self.app = FaceAnalysis(name="buffalo_l")  
-        self.app.prepare(ctx_id=ctx_id, det_size=det_size)
+        self.apps = []
+        for ds in det_sizes:
+            app = FaceAnalysis(name="buffalo_l")
+            app.prepare(ctx_id=ctx_id, det_size=ds)
+            self.apps.append((ds, app))
 
     def __call__(self, pil_images):
         embs = []
+        has_face = []
+
         for im in pil_images:
             img = np.array(im.convert("RGB"))[:, :, ::-1]  # RGB->BGR
-            faces = self.app.get(img)
+
+            faces = []
+            used_ds = None
+            for ds, app in self.apps:
+                faces = app.get(img)
+                if len(faces) != 0:
+                    used_ds = ds
+                    break
 
             if len(faces) == 0:
-                # если лицо не найдено: нулевой вектор
                 emb = np.zeros((512,), dtype=np.float32)
+                has_face.append(False)
             else:
-                # берём самое большое лицо
-                faces = sorted(faces, key=lambda f: (f.bbox[2]-f.bbox[0])*(f.bbox[3]-f.bbox[1]), reverse=True)
-                emb = faces[0].embedding.astype(np.float32)  # (512,)
+                faces = sorted(
+                    faces,
+                    key=lambda f: (f.bbox[2]-f.bbox[0])*(f.bbox[3]-f.bbox[1]),
+                    reverse=True
+                )
+                emb = faces[0].embedding.astype(np.float32)
+                has_face.append(True)
+
             embs.append(emb)
 
-        embs = np.stack(embs, axis=0)  # (B,512)
-        return torch.from_numpy(embs)
+        embs = np.stack(embs, axis=0)
+        return torch.from_numpy(embs), torch.tensor(has_face, dtype=torch.bool)
 
 
 class IDArcFaceConditioner(nn.Module):
