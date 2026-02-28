@@ -141,6 +141,7 @@ def qualitative_check(
     # 1) Compute conditioning tokens ONCE
     id_tokens = id_cond(pil_images, out_dtype=dtype_unet)
     hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
+    print("[qual] has_face:", face_mask[: min(8, len(face_mask))].tolist())
 
     # 2) Fixed noise
     gen = torch.Generator(device=pixel_values.device)
