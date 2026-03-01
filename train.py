@@ -102,11 +102,16 @@ def sample_with_cfg(
     for t in scheduler.timesteps:
         t_batch = torch.full((x.shape[0],), int(t), device=x.device, dtype=torch.long)
 
+        # !!! ключевая строка для DPMSolverMultistepScheduler
+        x_in = scheduler.scale_model_input(x, t) if hasattr(scheduler, "scale_model_input") else x
+
         with torch.cuda.amp.autocast(dtype=torch.float16):
-            eps_u = pipe.unet(x, t_batch, encoder_hidden_states=enc_uncond).sample
-            eps_c = pipe.unet(x, t_batch, encoder_hidden_states=enc_cond).sample
+            eps_u = pipe.unet(x_in, t_batch, encoder_hidden_states=enc_uncond).sample
+            eps_c = pipe.unet(x_in, t_batch, encoder_hidden_states=enc_cond).sample
 
         eps = eps_u + cfg_scale * (eps_c - eps_u)
+
+        # step() должен получать исходный x (НЕ x_in)
         x = scheduler.step(eps, t, x).prev_sample
 
     return x
