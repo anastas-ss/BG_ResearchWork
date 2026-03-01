@@ -63,6 +63,9 @@ class DualImageAttnProcessor(nn.Module):
         id_states = encoder_hidden_states["id"]
         hair_states = encoder_hidden_states["hair"]
 
+        id_states = id_states.to(dtype=self.to_k_id.weight.dtype)
+        hair_states = hair_states.to(dtype=self.to_k_hair.weight.dtype)
+
         # base attention to text (no recursion)
         base_out = self.base(
             attn,
