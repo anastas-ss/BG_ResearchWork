@@ -139,7 +139,8 @@ def qualitative_check(
     vae_sf = pipe.vae_scale_factor if hasattr(pipe, "vae_scale_factor") else 8
 
     # 1) Compute conditioning tokens ONCE
-    id_tokens = id_cond(pil_images, out_dtype=dtype_unet)
+    id_tokens, face_mask = id_cond(pil_images, out_dtype=dtype_unet, return_mask=True)
+    print("has_face:", face_mask.tolist())
     hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
 
     # 2) Fixed noise
