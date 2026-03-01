@@ -3,6 +3,8 @@ exp_name: method1_clip_shortcut
 seed: 42
 
 eval:
+  sanity_compare: true
+  prompt: "a portrait photo of a person"
   enabled: true
   every_steps: 200
   seed: 123
