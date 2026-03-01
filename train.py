@@ -375,9 +375,12 @@ def main(cfg_path: str):
     scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
     eval_scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
     if cfg.get("eval", {}).get("sanity_compare", False):
-    sanity_sampling_compare(pipe, eval_scheduler, prompt=cfg.get("eval", {}).get("prompt", "a portrait photo of a person"),
-                            steps=int(cfg["eval"].get("num_inference_steps", 30)),
-                            seed=int(cfg["eval"].get("seed", 123)))
+        sanity_sampling_compare(
+            pipe, 
+            eval_scheduler, 
+            prompt=cfg.get("eval", {}).get("prompt", "a portrait photo of a person"),
+            steps=int(cfg["eval"].get("num_inference_steps", 30)),
+            seed=int(cfg["eval"].get("seed", 123)))
     max_steps = int(cfg["train"]["max_steps"])
     log_every = int(cfg["train"]["log_every"])
     save_every = int(cfg["train"]["save_every"])
