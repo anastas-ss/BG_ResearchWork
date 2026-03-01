@@ -7,28 +7,40 @@ from PIL import Image
 from insightface.app import FaceAnalysis
 
 
+import numpy as np
+import torch
+from insightface.app import FaceAnalysis
+
+
 class InsightFaceArcFaceEmbedder:
-    def __init__(self, device="cuda", det_sizes=((640,640),(512,512),(768,768),(896,896))):
+    def __init__(self, device="cuda", min_size=256, max_size=640, step=64):
+        """
+        det_size будет перебираться:
+        640, 576, 512, ..., 256
+        """
         ctx_id = 0 if device.startswith("cuda") else -1
-        self.apps = []
-        for ds in det_sizes:
-            app = FaceAnalysis(name="buffalo_l")
-            app.prepare(ctx_id=ctx_id, det_size=ds)
-            self.apps.append((ds, app))
+        self.app = FaceAnalysis(name="buffalo_l")
+        self.app.prepare(ctx_id=ctx_id, det_size=(max_size, max_size))
+
+        # список размеров для перебора
+        self.det_sizes = [(size, size) for size in range(max_size, min_size - 1, -step)]
 
     def __call__(self, pil_images):
         embs = []
         has_face = []
 
         for im in pil_images:
-            img = np.array(im.convert("RGB"))[:, :, ::-1]  # RGB->BGR
+            img = np.array(im.convert("RGB"))[:, :, ::-1]  # RGB -> BGR
 
             faces = []
-            used_ds = None
-            for ds, app in self.apps:
-                faces = app.get(img)
-                if len(faces) != 0:
-                    used_ds = ds
+            used_size = None
+
+            # Перебор det_size
+            for ds in self.det_sizes:
+                self.app.det_model.input_size = ds
+                faces = self.app.get(img)
+                if len(faces) > 0:
+                    used_size = ds
                     break
 
             if len(faces) == 0:
@@ -37,8 +49,8 @@ class InsightFaceArcFaceEmbedder:
             else:
                 faces = sorted(
                     faces,
-                    key=lambda f: (f.bbox[2]-f.bbox[0])*(f.bbox[3]-f.bbox[1]),
-                    reverse=True
+                    key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]),
+                    reverse=True,
                 )
                 emb = faces[0].embedding.astype(np.float32)
                 has_face.append(True)
