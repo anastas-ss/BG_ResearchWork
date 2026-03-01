@@ -37,6 +37,17 @@ class DualImageAttnProcessor(nn.Module):
         temb=None,
         **kwargs
     ):
+        if isinstance(encoder_hidden_states, dict):
+            text_states = encoder_hidden_states["text"]
+            if torch.all(encoder_hidden_states["id"] == 0) and torch.all(encoder_hidden_states["hair"] == 0):
+                return self.base(
+                    attn,
+                    hidden_states,
+                    encoder_hidden_states=text_states,
+                    attention_mask=attention_mask,
+                    temb=temb,
+                    **kwargs
+                )
         # fallback: normal mode
         if not isinstance(encoder_hidden_states, dict):
             return self.base(
