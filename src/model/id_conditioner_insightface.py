@@ -9,23 +9,17 @@ from insightface.app import FaceAnalysis
 
 import numpy as np
 import torch
-from insightface.app import FaceAnalysis
 
 
 class InsightFaceArcFaceEmbedder:
     def __init__(self, device="cuda", min_size=256, max_size=640, step=64):
-        """
-        det_size будет перебираться:
-        640, 576, 512, ..., 256
-        """
         ctx_id = 0 if device.startswith("cuda") else -1
         self.app = FaceAnalysis(name="buffalo_l")
         self.app.prepare(ctx_id=ctx_id, det_size=(max_size, max_size))
 
-        # список размеров для перебора
         self.det_sizes = [(size, size) for size in range(max_size, min_size - 1, -step)]
 
-    def __call__(self, pil_images):
+    def __call__(self, pil_images, return_mask: bool = False):
         embs = []
         has_face = []
 
@@ -33,14 +27,10 @@ class InsightFaceArcFaceEmbedder:
             img = np.array(im.convert("RGB"))[:, :, ::-1]  # RGB -> BGR
 
             faces = []
-            used_size = None
-
-            # Перебор det_size
             for ds in self.det_sizes:
                 self.app.det_model.input_size = ds
                 faces = self.app.get(img)
                 if len(faces) > 0:
-                    used_size = ds
                     break
 
             if len(faces) == 0:
@@ -57,22 +47,16 @@ class InsightFaceArcFaceEmbedder:
 
             embs.append(emb)
 
-        embs = np.stack(embs, axis=0)
-        return torch.from_numpy(embs), torch.tensor(has_face, dtype=torch.bool)
+        embs = torch.from_numpy(np.stack(embs, axis=0))  # (B,512) float32
+        mask = torch.tensor(has_face, dtype=torch.bool)
+
+        if return_mask:
+            return embs, mask
+        return embs
 
 
 class IDArcFaceConditioner(nn.Module):
-    """
-    ID shortcut ветка:
-    y1 -> (det+align+ArcFace) -> f_id -> proj -> tokens -> в cross-attn
-    """
-    def __init__(
-        self,
-        n_tokens: int,
-        cross_dim: int,
-        device="cuda",
-        proj_dtype=torch.float32,
-    ):
+    def __init__(self, n_tokens: int, cross_dim: int, device="cuda", proj_dtype=torch.float32):
         super().__init__()
         self.device = device
         self.n_tokens = n_tokens
@@ -88,11 +72,19 @@ class IDArcFaceConditioner(nn.Module):
         ).to(device=device, dtype=proj_dtype)
 
     @torch.no_grad()
-    def _emb(self, pil_images):
-        emb = self.embedder(pil_images).to(self.device)  # fp32
-        return emb
+    def _emb(self, pil_images, return_mask: bool = False):
+        out = self.embedder(pil_images, return_mask=return_mask)
+        if return_mask:
+            emb, mask = out
+            return emb.to(self.device), mask.to(self.device)
+        return out.to(self.device)
 
-    def forward(self, pil_images, out_dtype: torch.dtype):
-        emb = self._emb(pil_images).float()
+    def forward(self, pil_images, out_dtype: torch.dtype, return_mask: bool = False):
+        if return_mask:
+            emb, mask = self._emb(pil_images, return_mask=True)
+            tokens = self.proj(emb.float()).view(-1, self.n_tokens, self.cross_dim)
+            return tokens.to(dtype=out_dtype), mask
+
+        emb = self._emb(pil_images, return_mask=False).float()
         tokens = self.proj(emb).view(-1, self.n_tokens, self.cross_dim)
         return tokens.to(dtype=out_dtype)
