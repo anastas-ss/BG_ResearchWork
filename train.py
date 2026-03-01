@@ -155,10 +155,11 @@ def qualitative_check(
 
     # 3) 4 variants (same noise, same text; only toggling id/hair)
     variants = [
-        ("both_on",   id_tokens,                    hair_tokens),
-        ("id_only",   id_tokens,                    torch.zeros_like(hair_tokens)),
-        ("hair_only", torch.zeros_like(id_tokens),  hair_tokens),
-        ("both_off",  torch.zeros_like(id_tokens),  torch.zeros_like(hair_tokens)),
+        ("both_on",       id_tokens,                   hair_tokens,                  7.0),
+        ("id_only_cfg1",  id_tokens,                   torch.zeros_like(hair_tokens), 1.0),
+        ("id_only_cfg3",  id_tokens,                   torch.zeros_like(hair_tokens), 3.0),
+        ("id_only_cfg7",  id_tokens,                   torch.zeros_like(hair_tokens), 7.0),
+        ("both_off",      torch.zeros_like(id_tokens), torch.zeros_like(hair_tokens), 7.0),
     ]
     # unconditional text (для CFG)
     tok_uc = pipe.tokenizer(
@@ -171,10 +172,10 @@ def qualitative_check(
     with torch.no_grad():
         text_emb_uc = pipe.text_encoder(**tok_uc).last_hidden_state.to(dtype_unet)
     rows = []
-    for tag, id_t, hair_t in variants:
+    for tag, id_t, hair_t, cfg_s in variants:
         enc_cond   = {"text": text_emb,    "id": id_t, "hair": hair_t}
         enc_uncond = {"text": text_emb_uc, "id": torch.zeros_like(id_t), "hair": torch.zeros_like(hair_t)}
-        
+    
         lat = sample_with_cfg(
             pipe=pipe,
             scheduler=scheduler,
@@ -182,7 +183,7 @@ def qualitative_check(
             enc_cond=enc_cond,
             enc_uncond=enc_uncond,
             num_steps=num_steps,
-            cfg_scale=float(7.0),   # можно вынести в cfg
+            cfg_scale=float(cfg_s),
         )
         img_01 = _vae_decode_to_01(pipe, lat, dtype_unet)  # [B,3,H,W]
         rows.append(img_01[:1])  # take first for a clean 4-up compare
