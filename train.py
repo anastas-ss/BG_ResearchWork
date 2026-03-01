@@ -190,8 +190,9 @@ def qualitative_check(
             num_steps=num_steps,
             cfg_scale=float(cfg_s),
         )
+    
         img_01 = _vae_decode_to_01(pipe, lat, dtype_unet)  # [B,3,H,W]
-        rows.append(img_01[:1])  # take first for a clean 4-up compare
+        rows.append(img_01[:1])  # первый в батче, чтобы получить 1хN grid
 
     row = torch.cat(rows, dim=0)  # [4,3,H,W]
     path = out_dir / f"step_{step:07d}.png"
