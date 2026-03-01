@@ -87,22 +87,16 @@ def _save_row(images_01: torch.Tensor, path: str):
 
 
 @torch.no_grad()
-def sample_with_cfg(
-    pipe,
-    scheduler,
-    latents,
-    enc_cond: dict,
-    enc_uncond: dict,
-    num_steps: int,
-    cfg_scale: float = 7.0,
-):
+def sample_with_cfg(pipe, scheduler, latents, enc_cond, enc_uncond, num_steps, cfg_scale=7.0):
     scheduler.set_timesteps(num_steps, device=latents.device)
+
+    latents = latents * scheduler.init_noise_sigma
+
     x = latents
-
     for t in scheduler.timesteps:
-        t_batch = torch.full((x.shape[0],), int(t), device=x.device, dtype=torch.long)
+        t_int = int(t.item())
+        t_batch = torch.full((x.shape[0],), t_int, device=x.device, dtype=torch.long)
 
-        # !!! ключевая строка для DPMSolverMultistepScheduler
         x_in = scheduler.scale_model_input(x, t) if hasattr(scheduler, "scale_model_input") else x
 
         with torch.cuda.amp.autocast(dtype=torch.float16):
@@ -110,8 +104,6 @@ def sample_with_cfg(
             eps_c = pipe.unet(x_in, t_batch, encoder_hidden_states=enc_cond).sample
 
         eps = eps_u + cfg_scale * (eps_c - eps_u)
-
-        # step() должен получать исходный x (НЕ x_in)
         x = scheduler.step(eps, t, x).prev_sample
 
     return x
@@ -157,7 +149,6 @@ def qualitative_check(
         dtype=dtype_unet,
         generator=gen,
     )
-
     # 3) 4 variants (same noise, same text; only toggling id/hair)
     variants = [
         ("both_on",       id_tokens,                   hair_tokens,                  7.0),
@@ -199,7 +190,47 @@ def qualitative_check(
     _save_row(row, str(path))
     print(f"[qual] saved {path}")
     _maybe_display(str(path))
+from PIL import Image
 
+@torch.no_grad()
+def sanity_sampling_compare(pipe, eval_scheduler, prompt="a portrait photo of a person", steps=30, seed=123):
+    device = pipe.device
+    dtype = next(pipe.unet.parameters()).dtype
+
+    # --- 1) baseline: родной pipe (text-only)
+    pipe.scheduler = eval_scheduler
+    gen = torch.Generator(device=device).manual_seed(int(seed))
+    img_pipe = pipe(prompt, num_inference_steps=int(steps), guidance_scale=7.0, generator=gen).images[0]
+    img_pipe.save("sanity_pipe.png")
+
+    # --- 2) твой sampler (text-only через dict)
+    tok = pipe.tokenizer([prompt], padding="max_length",
+                         max_length=pipe.tokenizer.model_max_length,
+                         return_tensors="pt").to(device)
+    text_emb = pipe.text_encoder(**tok).last_hidden_state.to(dtype)
+
+    tok_uc = pipe.tokenizer([""], padding="max_length",
+                            max_length=pipe.tokenizer.model_max_length,
+                            return_tensors="pt").to(device)
+    text_emb_uc = pipe.text_encoder(**tok_uc).last_hidden_state.to(dtype)
+
+    # латенты 512x512 -> 64x64
+    gen2 = torch.Generator(device=device).manual_seed(int(seed))
+    latents0 = torch.randn((1, 4, 64, 64), device=device, dtype=dtype, generator=gen2)
+
+    # пустые id/hair токены (важно: правильная форма)
+    cross_dim = pipe.unet.config.cross_attention_dim
+    zeros = torch.zeros((1, 1, cross_dim), device=device, dtype=dtype)
+
+    enc_c = {"text": text_emb, "id": zeros, "hair": zeros}
+    enc_u = {"text": text_emb_uc, "id": zeros, "hair": zeros}
+
+    lat = sample_with_cfg(pipe, eval_scheduler, latents0, enc_c, enc_u, num_steps=int(steps), cfg_scale=7.0)
+    img01 = _vae_decode_to_01(pipe, lat, dtype)[0]  # [3,H,W]
+
+    out = torchvision.utils.make_grid(torch.stack([torchvision.transforms.ToTensor()(img_pipe), img01.cpu()], dim=0), nrow=2)
+    torchvision.utils.save_image(out, "sanity_sampling.png")
+    print("saved: sanity_pipe.png and sanity_sampling.png (left=pipe, right=custom)")
 
 # -------------------------
 # Config
@@ -343,6 +374,10 @@ def main(cfg_path: str):
     
     scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
     eval_scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+    if cfg.get("eval", {}).get("sanity_compare", False):
+    sanity_sampling_compare(pipe, eval_scheduler, prompt=cfg.get("eval", {}).get("prompt", "a portrait photo of a person"),
+                            steps=int(cfg["eval"].get("num_inference_steps", 30)),
+                            seed=int(cfg["eval"].get("seed", 123)))
     max_steps = int(cfg["train"]["max_steps"])
     log_every = int(cfg["train"]["log_every"])
     save_every = int(cfg["train"]["save_every"])
