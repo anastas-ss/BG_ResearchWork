@@ -41,8 +41,8 @@ def project_face_embs(pipeline, face_embs):
 
     # ✅ FIX #2: вместо input_token_embs=...
     prompt_embeds = pipeline.text_encoder(
-        input_ids=None,
-        inputs_embeds=token_embs,
+        input_ids=input_ids_b,          # ✅ обязателен для твоей версии transformers
+        inputs_embeds=token_embs,        # ✅ подменённые эмбеддинги
         attention_mask=attention_mask_b,
         return_dict=True,
     ).last_hidden_state
