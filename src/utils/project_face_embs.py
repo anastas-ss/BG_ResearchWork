@@ -47,6 +47,9 @@ def project_face_embs(pipeline, face_embs):
     attn = (1.0 - attn.float()) * -10000.0
     attn = attn[:, None, None, :]  # (N,1,1,T)
     
+    # ✅ FIX: dtype маски должен совпадать с dtype query (token_embs)
+    attn = attn.to(dtype=token_embs.dtype)
+    
     enc_out = text_model.encoder(
         inputs_embeds=token_embs,
         attention_mask=attn,
