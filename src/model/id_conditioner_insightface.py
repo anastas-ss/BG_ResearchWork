@@ -75,7 +75,7 @@ class IDArcFaceConditioner(nn.Module):
         self.n_tokens = n_tokens
         self.cross_dim = cross_dim
 
-        self.embedder = InsightFaceArcFaceEmbedder(device=device, model_root="./")
+        self.embedder = InsightFaceArcFaceEmbedder(device=device, model_root="/content")
         in_dim = 512
 
         self.proj = nn.Sequential(
