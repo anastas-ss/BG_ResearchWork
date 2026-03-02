@@ -192,6 +192,6 @@ class HairConditioner(nn.Module):
         pooled = self._pooled_hair(pil_images)
         pooled = pooled / (pooled.norm(dim=-1, keepdim=True) + 1e-6)
         tokens = self.proj(pooled.float()).view(-1, self.n_tokens, self.cross_dim)
-        tokens = tokens / (tokens.norm(dim=-1, keepdim=True) + 1e-6)
+        #tokens = tokens / (tokens.norm(dim=-1, keepdim=True) + 1e-6)
         # tokens = tokens * 6.0
         return tokens.to(dtype=out_dtype)
