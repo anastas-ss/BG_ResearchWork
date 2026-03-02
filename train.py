@@ -35,6 +35,7 @@ from src.model.dual_ip_attention import DualImageAttnProcessor
 from src.model.id_conditioner_insightface import IDArcFaceConditioner
 from src.model.hair_conditioner_parsing import HairConditioner
 from src.model.hair_conditioner_parsing import remove_hair_from_pil
+from src.utils.project_face_embs import project_face_embs
 
 def _maybe_display(path: str):
     try:
@@ -473,15 +474,32 @@ def main(cfg_path: str):
             pil_id = [remove_hair_from_pil(im, hair_masks[i], fill=0.5) for i, im in enumerate(pil_images)]
         B = pixel_values.shape[0]
 
-        # Text embedding (prompt)
-        prompt = cfg.get("train", {}).get("prompt", "a portrait photo of a person")
-        tok = pipe.tokenizer(
-            [prompt] * B,
-            padding="max_length",
-            max_length=pipe.tokenizer.model_max_length,
-            return_tensors="pt",
-        ).to(device)
+        # # Text embedding (prompt)
+        # prompt = cfg.get("train", {}).get("prompt", "a portrait photo of a person")
+        # tok = pipe.tokenizer(
+        #     [prompt] * B,
+        #     padding="max_length",
+        #     max_length=pipe.tokenizer.model_max_length,
+        #     return_tensors="pt",
+        # ).to(device)
 
+        # Text embedding (Arc2Face): ArcFace(512) -> replace "id" token -> text_emb (B,T,H)
+        with torch.no_grad():
+            face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_id, return_mask=True)  # (B,512), (B,)
+            text_emb = project_face_embs(pipe, face_embs_512).to(dtype_unet)  # (B,T,H)
+        
+            # fallback: если лица нет, подставим обычный текстовый prompt только для этих элементов
+            if (~face_mask).any():
+                prompt = cfg.get("train", {}).get("prompt", "a portrait photo of a person")
+                tok_fb = pipe.tokenizer(
+                    [prompt] * B,
+                    padding="max_length",
+                    max_length=pipe.tokenizer.model_max_length,
+                    return_tensors="pt",
+                ).to(device)
+                text_fb = pipe.text_encoder(**tok_fb).last_hidden_state.to(dtype_unet)
+                text_emb = text_emb.clone()
+                text_emb[~face_mask] = text_fb[~face_mask]
         with torch.no_grad():
             text_emb = pipe.text_encoder(**tok).last_hidden_state.to(dtype_unet)  # [B,T,D]
 
@@ -563,15 +581,25 @@ def main(cfg_path: str):
                 #     q_text_emb = pipe.text_encoder(**q_tok).last_hidden_state.to(dtype_unet)
 
                 with torch.no_grad():
-                    # делаем hair-less картинки для ID (как в train)
+                    # hair-less для ID как и в train
                     q_hair_masks = hair_cond.get_hair_masks(q_pil)
                     q_pil_id = [remove_hair_from_pil(im, q_hair_masks[i], fill=0.5) for i, im in enumerate(q_pil)]
                 
-                    # TODO: получить (qB,512) ArcFace для q_pil_id
-                    # face_embs_512_q = id_cond.extract_arcface_embs(q_pil_id)
-                    # или face_embs_512_q = id_cond.embedder(q_pil_id)
+                    q_face_embs_512, q_face_mask = id_cond.extract_arcface_embs(q_pil_id, return_mask=True)
+                    q_text_emb = project_face_embs(pipe, q_face_embs_512).to(dtype_unet)
                 
-                    q_text_emb = project_face_embs(pipe, face_embs_512_q).to(dtype_unet)
+                    # fallback на обычный текст, если нет лица
+                    if (~q_face_mask).any():
+                        eval_prompt = cfg.get("eval", {}).get("prompt", "a portrait photo of a person")
+                        q_tok_fb = pipe.tokenizer(
+                            [eval_prompt] * qB,
+                            padding="max_length",
+                            max_length=pipe.tokenizer.model_max_length,
+                            return_tensors="pt",
+                        ).to(device)
+                        q_text_fb = pipe.text_encoder(**q_tok_fb).last_hidden_state.to(dtype_unet)
+                        q_text_emb = q_text_emb.clone()
+                        q_text_emb[~q_face_mask] = q_text_fb[~q_face_mask]
 
                 # switch to eval for sampling
                 was_unet_train = unet.training
