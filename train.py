@@ -537,7 +537,7 @@ def main(cfg_path: str):
         scaler.step(opt)
         scaler.update()
 
-        step += 1
+        #step += 1
 
         if step % log_every == 0:
             print(f"[step {step}/{max_steps}] loss={loss.item():.6f}")
@@ -610,6 +610,8 @@ def main(cfg_path: str):
             out = run_dir / f"ckpt_step{step}.pt"
             torch.save(ckpt, out)
             print("Saved:", out)
+            
+        step += 1 #вот тут добавила!
 
     print("Done. Run dir:", run_dir)
 
