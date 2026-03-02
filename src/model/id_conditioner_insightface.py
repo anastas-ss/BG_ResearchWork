@@ -3,10 +3,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
-# InsightFace
 from insightface.app import FaceAnalysis
-
-
 import numpy as np
 import torch
 
@@ -14,22 +11,33 @@ import torch
 class InsightFaceArcFaceEmbedder:
     def __init__(self, device="cuda", min_size=256, max_size=640, step=64, model_root="./"):
         ctx_id = 0 if device.startswith("cuda") else -1
+        providers = (
+            ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            if device.startswith("cuda")
+            else ["CPUExecutionProvider"]
+        )
 
-        providers = (["CUDAExecutionProvider", "CPUExecutionProvider"]
-                     if device.startswith("cuda") else ["CPUExecutionProvider"])
+        # Грузим ТОЛЬКО нужные модули
+        self.app = FaceAnalysis(
+            name="antelopev2",
+            root=model_root,
+            providers=providers,
+            allowed_modules=["detection", "recognition"],
+        )
 
-        # ВАЖНО: root должен указывать на папку, внутри которой есть ./models/antelopev2/...
-        self.app = FaceAnalysis(name="antelopev2", root=model_root, providers=providers)
         self.app.prepare(ctx_id=ctx_id, det_size=(max_size, max_size))
+
+        # sanity check — чтобы точно грузился arcface
+        print("Recognition model:", self.app.models["recognition"].model_file)
 
         self.det_sizes = [(size, size) for size in range(max_size, min_size - 1, -step)]
 
-    def __call__(self, pil_images, return_mask: bool = False):
+    def __call__(self, pil_images, return_mask=False):
         embs = []
         has_face = []
 
         for im in pil_images:
-            img = np.array(im.convert("RGB"))[:, :, ::-1]  # RGB -> BGR
+            img = np.array(im.convert("RGB"))[:, :, ::-1]
 
             faces = []
             for ds in self.det_sizes:
@@ -52,7 +60,7 @@ class InsightFaceArcFaceEmbedder:
 
             embs.append(emb)
 
-        embs = torch.from_numpy(np.stack(embs, axis=0))  # (B,512) float32
+        embs = torch.from_numpy(np.stack(embs, axis=0))
         mask = torch.tensor(has_face, dtype=torch.bool)
 
         if return_mask:
