@@ -348,7 +348,11 @@ def main(cfg_path: str):
         proj_dtype=torch.float32,
         bg_value=float(cfg["cond"].get("hair_bg_value", 0.0)),
     ).to(device)
-
+    
+    # ---- Shortcut exp: FREEZE ID branch completely
+    id_cond.eval()
+    id_cond.requires_grad_(False)
+    
     # ---- Data
     ds = ImageFolderDataset(cfg["data"]["train_dir"], image_size=int(cfg["data"]["image_size"]))
     dl = DataLoader(
@@ -361,9 +365,11 @@ def main(cfg_path: str):
         drop_last=True,
     )
     
-    # ---- Trainable params: conditioner projections + dual attention K/V projections
-    train_params = list(id_cond.proj.parameters()) + list(hair_cond.proj.parameters())
-
+    hair_cond.requires_grad_(False)
+    hair_cond.proj.requires_grad_(True)
+    # ---- Trainable params: ONLY hair projection + dual attention params
+    train_params = list(hair_cond.proj.parameters())
+    
     for proc in unet.attn_processors.values():
         if isinstance(proc, DualImageAttnProcessor):
             for p in proc.parameters():
@@ -376,6 +382,13 @@ def main(cfg_path: str):
         weight_decay=float(cfg["train"]["weight_decay"]),
     )
 
+    def count_trainable(m):
+        return sum(p.numel() for p in m.parameters() if p.requires_grad)
+
+    print("trainable id_cond:", count_trainable(id_cond))      # должно быть 0
+    print("trainable hair_cond:", count_trainable(hair_cond))
+    print("trainable hair_proj:", count_trainable(hair_cond.proj))  # > 0
+    
     # AMP scaler (use torch.cuda.amp for broad compatibility)
     scaler = torch.cuda.amp.GradScaler(enabled=True)
 
@@ -393,7 +406,12 @@ def main(cfg_path: str):
     from src.utils.hair_leakage_check import hair_leakage_check_one
     # ---- (DEBUG) hair leakage check: один раз перед train
     if cfg.get("eval", {}).get("hair_leak_check", False):
-        face_app = FaceAnalysis(name="buffalo_l")   # пока так; потом поменяем на antelopev2
+        face_app = FaceAnalysis(
+            name="antelopev2",
+            root="/content",  # или "./" если models лежит рядом с train.py
+            providers=["CUDAExecutionProvider","CPUExecutionProvider"],
+            allowed_modules=["detection", "recognition"],
+        )
         face_app.prepare(ctx_id=0, det_size=(640,640))
     
         hair_cond.debug_save = True
@@ -456,7 +474,7 @@ def main(cfg_path: str):
 
     # ---- Modes
     unet.train()      # only attn_processor params have requires_grad=True
-    id_cond.train()   # projection trainable
+    id_cond.eval()    # frozen branch stays in eval
     hair_cond.train() # projection trainable
 
     step = 0
@@ -499,7 +517,8 @@ def main(cfg_path: str):
         noisy = scheduler.add_noise(latents, noise, t).to(dtype=dtype_unet)
 
         # ---- Conditioning tokens (from PIL)
-        id_tokens = id_cond(pil_images, out_dtype=dtype_unet)
+        with torch.no_grad():
+            id_tokens = id_cond(pil_images, out_dtype=dtype_unet)
         hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
         enc = {"text": text_emb, "id": id_tokens, "hair": hair_tokens}
 
