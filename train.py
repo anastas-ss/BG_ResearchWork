@@ -349,6 +349,26 @@ def main(cfg_path: str):
         bg_value=float(cfg["cond"].get("hair_bg_value", 0.0)),
     ).to(device)
 
+    from insightface.app import FaceAnalysis
+
+    # ... после создания id_cond/hair_cond
+    if cfg.get("eval", {}).get("hair_leak_check", False):
+        face_app = FaceAnalysis(name="buffalo_l")   # пока так; потом поменяем на antelopev2
+        face_app.prepare(ctx_id=0, det_size=(640,640))
+    
+        from src.utils.hair_leakage_check import hair_leakage_check_one
+        hair_cond.debug_save = True
+    
+        sample = next(iter(dl))
+        pil0 = sample["pil"][0]
+    
+        hair_leakage_check_one(
+            pil=pil0,
+            hair_cond=hair_cond,
+            face_app=face_app,
+            arcface_embedder=id_cond.embedder,   # твой embedder
+            out_prefix="leak",
+        )
     # ---- Trainable params: conditioner projections + dual attention K/V projections
     train_params = list(id_cond.proj.parameters()) + list(hair_cond.proj.parameters())
 
