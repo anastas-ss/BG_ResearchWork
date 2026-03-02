@@ -12,9 +12,14 @@ import torch
 
 
 class InsightFaceArcFaceEmbedder:
-    def __init__(self, device="cuda", min_size=256, max_size=640, step=64):
+    def __init__(self, device="cuda", min_size=256, max_size=640, step=64, model_root="./"):
         ctx_id = 0 if device.startswith("cuda") else -1
-        self.app = FaceAnalysis(name="buffalo_l")
+
+        providers = (["CUDAExecutionProvider", "CPUExecutionProvider"]
+                     if device.startswith("cuda") else ["CPUExecutionProvider"])
+
+        # ВАЖНО: root должен указывать на папку, внутри которой есть ./models/antelopev2/...
+        self.app = FaceAnalysis(name="antelopev2", root=model_root, providers=providers)
         self.app.prepare(ctx_id=ctx_id, det_size=(max_size, max_size))
 
         self.det_sizes = [(size, size) for size in range(max_size, min_size - 1, -step)]
@@ -62,7 +67,7 @@ class IDArcFaceConditioner(nn.Module):
         self.n_tokens = n_tokens
         self.cross_dim = cross_dim
 
-        self.embedder = InsightFaceArcFaceEmbedder(device=device)
+        self.embedder = InsightFaceArcFaceEmbedder(device=device, model_root="./")
         in_dim = 512
 
         self.proj = nn.Sequential(
