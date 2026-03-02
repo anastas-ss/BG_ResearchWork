@@ -142,7 +142,7 @@ def qualitative_check(
         face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_images, return_mask=True)  # (B,512), (B,)
         
         # Проецируем в cross-attention токены [B, n_tokens, cross_dim]
-        id_tokens = id_cond.proj(face_embs_512.to(dtype_unet)) # [B, n_tokens*cross_dim]
+        id_tokens = id_cond.proj(face_embs_512.float())  # всегда float32 для замороженного ID # [B, n_tokens*cross_dim]
         id_tokens = id_tokens.view(len(pil_images), id_cond.n_tokens, hair_tokens.shape[-1])  # [B, n_tokens, cross_dim]
     
         # fallback для изображений без лица
@@ -481,7 +481,7 @@ def main(cfg_path: str):
             face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_id, return_mask=True)  # (B,512), (B,)
             
             # Проецируем в cross-attention токены [B, n_tokens, cross_dim]
-            id_tokens = id_cond.proj(face_embs_512.to(dtype_unet)) # [B, n_tokens*cross_dim]
+            id_tokens = id_cond.proj(face_embs_512.float())  # всегда float32 для замороженного ID # [B, n_tokens*cross_dim]
             id_tokens = id_tokens.view(B, id_cond.n_tokens, cross_dim)  # [B, n_tokens, cross_dim]
         
             # fallback для изображений без лица
