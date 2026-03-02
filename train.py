@@ -453,8 +453,8 @@ def main(cfg_path: str):
         noisy = scheduler.add_noise(latents, noise, t).to(dtype=dtype_unet)
 
         # Conditioning tokens (from PIL)
-        with torch.no_grad():
-            id_tokens = id_cond(pil_id, out_dtype=dtype_unet)  # (B,n_tokens,cross_dim)
+        # with torch.no_grad():
+        #     id_tokens = id_cond(pil_id, out_dtype=dtype_unet)  # (B,n_tokens,cross_dim)
         hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)  # (B,n_tokens,cross_dim)
 
         if step == 0:
@@ -473,7 +473,7 @@ def main(cfg_path: str):
             _stat("hair", hair_tokens)   # [B,N,768]
             print("[diag] B:", B)
 
-        enc = {"text": text_emb, "id": id_tokens, "hair": hair_tokens}
+        enc = {"text": text_emb, "id": torch.zeros_like(id_tokens), "hair": hair_tokens}
 
         # Train step (predict noise)
         opt.zero_grad(set_to_none=True)
