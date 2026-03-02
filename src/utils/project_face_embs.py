@@ -1,12 +1,15 @@
+import torch
+import torch.nn.functional as F
+
 @torch.no_grad()
 def project_face_embs(pipeline, face_embs):
     """
     face_embs: (N, 512) normalized ArcFace embeddings
     Returns: [N, T, H] text embeddings ready for UNet conditioning
     """
+
     tokenizer = pipeline.tokenizer
     text_encoder = pipeline.text_encoder
-
     device = pipeline.device
     N = face_embs.shape[0]
 
@@ -27,8 +30,9 @@ def project_face_embs(pipeline, face_embs):
     input_ids_b = input_ids.repeat(N, 1)            # [N, T]
     attention_mask_b = attention_mask.repeat(N, 1)  # [N, T]
 
-    # получаем токен эмбеддинги
-    token_embs = text_encoder(input_ids=input_ids_b, return_token_embs=True)  # [N, T, H]
+    # получаем токен эмбеддинги напрямую через input_ids
+    token_embs_out = text_encoder(input_ids=input_ids_b, return_token_embs=True)
+    token_embs = token_embs_out.last_hidden_state  # теперь это [N, T, H] с dtype
 
     # находим позицию токена "id"
     arcface_token_id = tokenizer.encode("id", add_special_tokens=False)[0]
@@ -41,10 +45,9 @@ def project_face_embs(pipeline, face_embs):
 
     # forward через text_encoder только с inputs_embeds
     outputs = text_encoder(
-        input_ids=input_ids_b,       # input_ids нужен для позиционных эмбеддингов
         inputs_embeds=token_embs,
         attention_mask=attention_mask_b,
         return_dict=True
     )
 
-    return outputs.last_hidden_state  # [N, T, H]
+    return outputs.last_hidden_state
