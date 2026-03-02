@@ -135,7 +135,28 @@ def qualitative_check(
     face_mask = torch.ones(len(pil_images), device=pixel_values.device, dtype=torch.bool)
 
     hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
-    id_tokens = torch.zeros(len(pil_images), id_cond.n_tokens, hair_tokens.shape[-1], device=pixel_values.device, dtype=dtype_unet)
+    
+   # ---- ArcFace ID tokens (frozen) ----
+    with torch.no_grad():
+        # Получаем ArcFace embedding [B,512]
+        face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_images, return_mask=True)  # (B,512), (B,)
+        
+        # Проецируем в cross-attention токены [B, n_tokens, cross_dim]
+        id_tokens = id_cond.proj(face_embs_512.to(id_cond.proj.weight.dtype))  # [B, n_tokens*cross_dim]
+        id_tokens = id_tokens.view(len(pil_images), id_cond.n_tokens, hair_tokens.shape[-1])  # [B, n_tokens, cross_dim]
+    
+        # fallback для изображений без лица
+        if (~face_mask).any():
+            prompt_fb = "a portrait photo of a person"
+            tok_fb = pipe.tokenizer(
+                [prompt_fb] * len(pil_images),
+                padding="max_length",
+                max_length=pipe.tokenizer.model_max_length,
+                return_tensors="pt",
+            ).to(pil_images[0].device)
+            text_fb = pipe.text_encoder(**tok_fb).last_hidden_state.to(dtype_unet)
+            id_tokens[~face_mask] = 0.0  # оставляем ID-токены нулями для отсутствующих лиц
+    
     print("has_face:", face_mask.tolist())
 
     print(
@@ -454,35 +475,34 @@ def main(cfg_path: str):
         noisy = scheduler.add_noise(latents, noise, t).to(dtype=dtype_unet)
 
         # Conditioning tokens (from PIL)
-        # with torch.no_grad():
-        #     id_tokens = id_cond(pil_id, out_dtype=dtype_unet)  # (B,n_tokens,cross_dim)
-        hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)  # (B,n_tokens,cross_dim)
-
-        if step == 0:
-            def _stat(name, x):
-                x32 = x.detach().float()
-                print(
-                    f"[diag] {name:>5}  shape={tuple(x.shape)}  "
-                    f"mean|x|={x32.abs().mean().item():.4f}  "
-                    f"rms={x32.pow(2).mean().sqrt().item():.4f}  "
-                    f"mean_norm={x32.norm(dim=-1).mean().item():.4f}  "
-                    f"max_norm={x32.norm(dim=-1).max().item():.4f}"
-                )
-
-            _stat("text", text_emb)      # [B,T,768]
-            _stat("id", torch.zeros_like(hair_tokens))      # [B,N,768]
-            _stat("hair", hair_tokens)   # [B,N,768]
-            print("[diag] B:", B)
-
-        zero_id = torch.zeros(
-            B,
-            n_tokens,
-            cross_dim,
-            device=device,
-            dtype=dtype_unet,
-        )
+        # ---- ArcFace ID tokens (frozen) ----
+        with torch.no_grad():
+            # Получаем ArcFace embedding [B,512]
+            face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_id, return_mask=True)  # (B,512), (B,)
+            
+            # Проецируем в cross-attention токены [B, n_tokens, cross_dim]
+            id_tokens = id_cond.proj(face_embs_512.to(id_cond.proj.weight.dtype))  # [B, n_tokens*cross_dim]
+            id_tokens = id_tokens.view(B, id_cond.n_tokens, cross_dim)  # [B, n_tokens, cross_dim]
         
-        enc = {"text": text_emb, "id": zero_id, "hair": hair_tokens}
+            # fallback для изображений без лица
+            if (~face_mask).any():
+                # обычный текст prompt для отсутствующих лиц
+                prompt_fb = cfg.get("train", {}).get("prompt", "a portrait photo of a person")
+                tok_fb = pipe.tokenizer(
+                    [prompt_fb] * B,
+                    padding="max_length",
+                    max_length=pipe.tokenizer.model_max_length,
+                    return_tensors="pt",
+                ).to(device)
+                text_fb = pipe.text_encoder(**tok_fb).last_hidden_state.to(dtype_unet)
+                # Здесь мы просто оставляем id_tokens для этих позиций как нули
+                id_tokens[~face_mask] = 0.0
+        
+        # Hair tokens
+        hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)  # [B, n_tokens, cross_dim]
+        
+        # Сборка conditioning
+        enc = {"text": text_emb, "id": id_tokens, "hair": hair_tokens}
 
         # Train step (predict noise)
         opt.zero_grad(set_to_none=True)
