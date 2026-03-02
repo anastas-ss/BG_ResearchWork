@@ -1,15 +1,17 @@
 # train.py
 # - Stable Diffusion (frozen backbone)
 # - DualImageAttnProcessor injected into ALL cross-attn (attn2) blocks
-# - Two external condition streams: ID (ArcFace) and Hair (Parsing + CLIP)
+# - Two external condition streams: ID (ArcFace tokens) and Hair (Parsing + CLIP)
+# - Text stream ("text") is Arc2Face-style: ArcFace(512) is injected into the CLIP text prompt token "id"
 # - Qualitative samples saved as 4-up grid: both_on / id_only / hair_only / both_off
 #
 # Expected repo structure:
 #   src/data/images.py                      -> ImageFolderDataset (returns pixel_values, pil, path)
 #   src/model/dual_ip_attention.py          -> DualImageAttnProcessor
-#   src/model/id_conditioner_insightface.py -> IDArcFaceConditioner
+#   src/model/id_conditioner_insightface.py -> IDArcFaceConditioner (with extract_arcface_embs)
 #   src/model/hair_conditioner_parsing.py   -> HairConditioner
 #   src/utils/repro.py                      -> set_seed
+#   src/utils/project_face_embs.py          -> project_face_embs (ArcFace->CLIP prompt embeds)
 #
 # Run:
 #   python train.py --cfg config.yaml
@@ -33,25 +35,9 @@ from src.utils.repro import set_seed
 from src.data.images import ImageFolderDataset
 from src.model.dual_ip_attention import DualImageAttnProcessor
 from src.model.id_conditioner_insightface import IDArcFaceConditioner
-from src.model.hair_conditioner_parsing import HairConditioner
-from src.model.hair_conditioner_parsing import remove_hair_from_pil
+from src.model.hair_conditioner_parsing import HairConditioner, remove_hair_from_pil
 from src.utils.project_face_embs import project_face_embs
 
-def _maybe_display(path: str):
-    try:
-        from IPython.display import display
-        from PIL import Image
-        display(Image.open(path))
-    except Exception as e:
-        print(f"[qual] (display skipped) {e}")
-def _print_png_base64(path: str, max_kb: int = 800):
-    import base64
-    data = open(path, "rb").read()
-    if len(data) > max_kb * 1024:
-        print(f"[qual] png too big ({len(data)/1024:.1f} KB), not printing base64")
-        return
-    b64 = base64.b64encode(data).decode("utf-8")
-    print("data:image/png;base64," + b64)
 
 # Data collation (keep PIL)
 def collate_keep_pil(batch_list):
@@ -61,7 +47,6 @@ def collate_keep_pil(batch_list):
     return {"pixel_values": pixel_values, "pil": pil, "path": path}
 
 
-# Helpers: decode/save/sample
 @torch.no_grad()
 def _vae_decode_to_01(pipe: StableDiffusionPipeline, latents: torch.Tensor, dtype_unet: torch.dtype):
     """
@@ -110,9 +95,8 @@ def sample_with_cfg(
 
         eps_u = pipe.unet(x_in, t_batch, encoder_hidden_states=enc_uncond).sample
         eps_c = pipe.unet(x_in, t_batch, encoder_hidden_states=enc_cond).sample
-        
-        eps = eps_u + cfg_scale * (eps_c - eps_u)
 
+        eps = eps_u + cfg_scale * (eps_c - eps_u)
         x = scheduler.step(eps, t, x).prev_sample
 
     return x
@@ -136,7 +120,7 @@ def qualitative_check(
 ):
     """
     Saves: runs/<exp>/samples/step_XXXXXXX.png
-    Row: [both_on | id_only | hair_only | both_off]
+    Row: [orig | both_on | id_only | hair_only | both_off]
     """
     out_dir = run_dir / "samples"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -147,11 +131,12 @@ def qualitative_check(
     # remove hair from ID shortcut in eval too
     hair_masks = hair_cond.get_hair_masks(pil_images)
     pil_id = [remove_hair_from_pil(im, hair_masks[i], fill=0.5) for i, im in enumerate(pil_images)]
-    
+
     id_tokens, face_mask = id_cond(pil_id, out_dtype=dtype_unet, return_mask=True)
     print("has_face:", face_mask.tolist())
-    
+
     hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
+
     print(
         f"[qual diag] mean|text|={text_emb.detach().float().abs().mean().item():.4f}  "
         f"mean|id|={id_tokens.detach().float().abs().mean().item():.4f}  "
@@ -162,6 +147,7 @@ def qualitative_check(
         f"id={id_tokens.detach().float().norm(dim=-1).mean().item():.4f}  "
         f"hair={hair_tokens.detach().float().norm(dim=-1).mean().item():.4f}"
     )
+
     # Fixed noise
     gen = torch.Generator(device=pixel_values.device)
     gen.manual_seed(int(seed))
@@ -171,19 +157,7 @@ def qualitative_check(
         dtype=dtype_unet,
         generator=gen,
     )
-    # old = []
-    # for proc in pipe.unet.attn_processors.values():
-    #     if isinstance(proc, DualImageAttnProcessor):
-    #         old.append((proc, proc.scale_id))
-    #         proc.scale_id = 0.0
-    #try:
-    # 3) 4 variants (same noise, same text; only toggling id/hair)
-    variants = [
-        ("both_on",   id_tokens,                   hair_tokens,                   7.0),
-        ("id_only",   id_tokens,                   torch.zeros_like(hair_tokens), 7.0),
-        ("hair_only", torch.zeros_like(id_tokens), hair_tokens,                   7.0),
-        ("both_off",  torch.zeros_like(id_tokens), torch.zeros_like(hair_tokens), 7.0),
-    ]
+
     # unconditional text (для CFG)
     tok_uc = pipe.tokenizer(
         [""] * B,
@@ -194,11 +168,19 @@ def qualitative_check(
 
     with torch.no_grad():
         text_emb_uc = pipe.text_encoder(**tok_uc).last_hidden_state.to(dtype_unet)
+
+    variants = [
+        ("both_on",   id_tokens,                   hair_tokens,                   7.0),
+        ("id_only",   id_tokens,                   torch.zeros_like(hair_tokens), 7.0),
+        ("hair_only", torch.zeros_like(id_tokens), hair_tokens,                   7.0),
+        ("both_off",  torch.zeros_like(id_tokens), torch.zeros_like(hair_tokens), 7.0),
+    ]
+
     rows = []
     for tag, id_t, hair_t, cfg_s in variants:
         enc_cond   = {"text": text_emb,    "id": id_t, "hair": hair_t}
         enc_uncond = {"text": text_emb_uc, "id": torch.zeros_like(id_t), "hair": torch.zeros_like(hair_t)}
-        
+
         lat = sample_with_cfg(
             pipe=pipe,
             scheduler=scheduler,
@@ -208,27 +190,23 @@ def qualitative_check(
             num_steps=num_steps,
             cfg_scale=float(cfg_s),
         )
-    
+
         img_01 = _vae_decode_to_01(pipe, lat, dtype_unet)  # [B,3,H,W]
-        rows.append(img_01[:1]) 
+        rows.append(img_01[:1])
+
     orig_01 = (pixel_values[:1].float() * 0.5 + 0.5).clamp(0, 1)
-    row = torch.cat([orig_01] + rows, dim=0) 
-    # finally:
-    #     for proc, v in old:
-    #         proc.scale_id = v
+    row = torch.cat([orig_01] + rows, dim=0)
 
     path = out_dir / f"step_{step:07d}.png"
     _save_row(row, str(path))
     print(f"[qual] saved {path}")
-    _maybe_display(str(path))
-from PIL import Image
-# Config
+
+
 def load_cfg(path: str):
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
 
-# Main
 def main(cfg_path: str):
     cfg = load_cfg(cfg_path)
 
@@ -292,13 +270,7 @@ def main(cfg_path: str):
 
     unet.set_attn_processor(attn_procs)
     print(f"[init] injected DualImageAttnProcessor into {n_cross} cross-attn blocks")
-    for name, proc in unet.attn_processors.items():
-        if isinstance(proc, DualImageAttnProcessor):
-            print("[diag] to_k_id abs mean:", float(proc.to_k_id.weight.detach().abs().mean()))
-            print("[diag] to_v_id abs mean:", float(proc.to_v_id.weight.detach().abs().mean()))
-            print("[diag] to_k_hair abs mean:", float(proc.to_k_hair.weight.detach().abs().mean()))
-            print("[diag] to_v_hair abs mean:", float(proc.to_v_hair.weight.detach().abs().mean()))
-            break
+
     # Freeze SD backbone
     pipe.vae.requires_grad_(False)
     pipe.text_encoder.requires_grad_(False)
@@ -307,7 +279,7 @@ def main(cfg_path: str):
     # Build conditioners
     n_tokens = int(cfg["cond"]["n_tokens"])
     clip_id = cfg["models"]["clip_vision_id"]
-    hair_w = cfg["models"]["hair_parsing_weights"]  # path to .pth
+    hair_w = cfg["models"]["hair_parsing_weights"]
 
     id_cond = IDArcFaceConditioner(
         n_tokens=n_tokens,
@@ -327,11 +299,11 @@ def main(cfg_path: str):
         proj_dtype=torch.float32,
         bg_value=float(cfg["cond"].get("hair_bg_value", 0.0)),
     ).to(device)
-    
+
     # Shortcut exp: FREEZE ID branch completely
     id_cond.eval()
     id_cond.requires_grad_(False)
-    
+
     # Data
     ds = ImageFolderDataset(cfg["data"]["train_dir"], image_size=int(cfg["data"]["image_size"]))
     dl = DataLoader(
@@ -343,13 +315,13 @@ def main(cfg_path: str):
         collate_fn=collate_keep_pil,
         drop_last=True,
     )
-    
+
+    # Train only hair projection + hair branch inside DualImageAttnProcessor
     hair_cond.requires_grad_(False)
     hair_cond.proj.requires_grad_(True)
-    
+
     for proc in unet.attn_processors.values():
         if isinstance(proc, DualImageAttnProcessor):
-            # train only hair branch inside DualImageAttnProcessor
             proc.to_k_id.requires_grad_(False)
             proc.to_v_id.requires_grad_(False)
             proc.to_k_hair.requires_grad_(True)
@@ -358,10 +330,10 @@ def main(cfg_path: str):
     dual_params = []
     for proc in unet.attn_processors.values():
         if isinstance(proc, DualImageAttnProcessor):
-            # только trainable параметры
             dual_params += [p for p in proc.parameters() if p.requires_grad]
+
     train_params = list(hair_cond.proj.parameters()) + dual_params
-    
+
     opt = torch.optim.AdamW(
         [
             {"params": list(hair_cond.proj.parameters()), "lr": float(cfg["train"]["lr"])},
@@ -369,92 +341,63 @@ def main(cfg_path: str):
         ],
         weight_decay=float(cfg["train"]["weight_decay"]),
     )
+
     def count_trainable(m):
         return sum(p.numel() for p in m.parameters() if p.requires_grad)
 
-    print("trainable id_cond:", count_trainable(id_cond))      # должно быть 0
+    print("trainable id_cond:", count_trainable(id_cond))            # 0
     print("trainable hair_cond:", count_trainable(hair_cond))
-    print("trainable hair_proj:", count_trainable(hair_cond.proj))  # > 0
-    
-    # AMP scaler (use torch.cuda.amp for broad compatibility)
+    print("trainable hair_proj:", count_trainable(hair_cond.proj))   # > 0
+
     scaler = torch.cuda.amp.GradScaler(enabled=True)
 
-    # Fixed batch for eval
     fixed_batch = None
     if cfg.get("eval", {}).get("enabled", False):
         fixed_batch = next(iter(dl))
 
-    # Scheduler for training noise / for eval sampling
-    
     scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
     eval_scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
 
-    from insightface.app import FaceAnalysis
-    from src.utils.hair_leakage_check import hair_leakage_check_one
-    # hair leakage check
-    if cfg.get("eval", {}).get("hair_leak_check", False):
-        face_app = FaceAnalysis(
-            name="antelopev2",
-            root="/content", 
-            providers=["CUDAExecutionProvider","CPUExecutionProvider"],
-            allowed_modules=["detection", "recognition"],
-        )
-        face_app.prepare(ctx_id=0, det_size=(640,640))
-    
-        hair_cond.debug_save = True
-    
-        sample = next(iter(dl))
-        pil0 = sample["pil"][0]
-    
-        hair_leakage_check_one(
-            pil=pil0,
-            hair_cond=hair_cond,
-            face_app=face_app,
-            arcface_embedder=id_cond.embedder,
-            out_prefix="leak",
-        )
-
+    # Optional sanity compare (text-only standard)
     if cfg.get("eval", {}).get("sanity_compare", False):
         pipe.scheduler = eval_scheduler
-    
         prompt_s = cfg.get("eval", {}).get("prompt", "a portrait photo of a person")
-        steps_s  = int(cfg["eval"].get("num_inference_steps", 30))
-        seed_s   = int(cfg["eval"].get("seed", 123))
-    
-        # text embeds
+        steps_s = int(cfg["eval"].get("num_inference_steps", 30))
+        seed_s = int(cfg["eval"].get("seed", 123))
+
         tok = pipe.tokenizer([prompt_s], padding="max_length",
                              max_length=pipe.tokenizer.model_max_length,
                              return_tensors="pt").to(device)
         text_emb_s = pipe.text_encoder(**tok).last_hidden_state.to(dtype_unet)
-    
+
         tok_uc = pipe.tokenizer([""], padding="max_length",
                                 max_length=pipe.tokenizer.model_max_length,
                                 return_tensors="pt").to(device)
         text_emb_uc_s = pipe.text_encoder(**tok_uc).last_hidden_state.to(dtype_unet)
-    
-        # zeros id/hair
+
         id0 = torch.zeros((1, 1, cross_dim), device=device, dtype=dtype_unet)
-        h0  = torch.zeros((1, 1, cross_dim), device=device, dtype=dtype_unet)
-    
+        h0 = torch.zeros((1, 1, cross_dim), device=device, dtype=dtype_unet)
+
         enc_c = {"text": text_emb_s, "id": id0, "hair": h0}
         enc_u = {"text": text_emb_uc_s, "id": id0, "hair": h0}
-    
+
         gen = torch.Generator(device=device).manual_seed(seed_s)
         lat0 = torch.randn((1, 4, 64, 64), device=device, dtype=dtype_unet, generator=gen)
-    
+
         lat = sample_with_cfg(pipe, eval_scheduler, lat0, enc_c, enc_u, num_steps=steps_s, cfg_scale=7.0)
         img01 = _vae_decode_to_01(pipe, lat, dtype_unet)
-    
+
         torchvision.utils.save_image(img01, str(run_dir / "sanity_text_only.png"))
         print("[sanity] saved", run_dir / "sanity_text_only.png")
+
     max_steps = int(cfg["train"]["max_steps"])
     log_every = int(cfg["train"]["log_every"])
     save_every = int(cfg["train"]["save_every"])
 
     # Modes
-    unet.train()      # only attn_processor params have requires_grad=True
-    id_cond.eval()    # frozen branch stays in eval
-    hair_cond.train() # projection trainable
+    unet.train()
+    id_cond.eval()
+    hair_cond.train()
 
     step = 0
     it = iter(dl)
@@ -468,31 +411,29 @@ def main(cfg_path: str):
 
         pixel_values = batch["pixel_values"].to(device=device, dtype=dtype_unet)  # [-1,1], fp16
         pil_images = batch["pil"]  # list[PIL]
-        # build hair-less images for ID branch (Step1: remove H from shortcut)
-        with torch.no_grad():
-            hair_masks = hair_cond.get_hair_masks(pil_images)  # (B,512,512)
-            pil_id = [remove_hair_from_pil(im, hair_masks[i], fill=0.5) for i, im in enumerate(pil_images)]
         B = pixel_values.shape[0]
 
-        # # Text embedding (prompt)
-        # prompt = cfg.get("train", {}).get("prompt", "a portrait photo of a person")
-        # tok = pipe.tokenizer(
-        #     [prompt] * B,
-        #     padding="max_length",
-        #     max_length=pipe.tokenizer.model_max_length,
-        #     return_tensors="pt",
-        # ).to(device)
+        # Build hair-less images for ID branch
+        with torch.no_grad():
+            hair_masks = hair_cond.get_hair_masks(pil_images)
+            pil_id = [remove_hair_from_pil(im, hair_masks[i], fill=0.5) for i, im in enumerate(pil_images)]
 
-        # Text embedding (Arc2Face): ArcFace(512) -> replace "id" token -> text_emb (B,T,H)
+        # ---- Arc2Face text embedding ----
         with torch.no_grad():
             face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_id, return_mask=True)  # (B,512), (B,)
             text_emb = project_face_embs(pipe, face_embs_512).to(dtype_unet)  # (B,T,H)
-        
-            # fallback: если лица нет, подставим обычный текстовый prompt только для этих элементов
+
+            if text_emb.shape[0] != B:
+                if text_emb.shape[0] == 1:
+                    text_emb = text_emb.repeat(B, 1, 1)
+                else:
+                    raise RuntimeError(f"text_emb batch mismatch: got {text_emb.shape[0]} vs B={B}")
+
+            # fallback: если лица нет — подставим обычный текст только для этих элементов
             if (~face_mask).any():
-                prompt = cfg.get("train", {}).get("prompt", "a portrait photo of a person")
+                prompt_fb = cfg.get("train", {}).get("prompt", "a portrait photo of a person")
                 tok_fb = pipe.tokenizer(
-                    [prompt] * B,
+                    [prompt_fb] * B,
                     padding="max_length",
                     max_length=pipe.tokenizer.model_max_length,
                     return_tensors="pt",
@@ -500,8 +441,6 @@ def main(cfg_path: str):
                 text_fb = pipe.text_encoder(**tok_fb).last_hidden_state.to(dtype_unet)
                 text_emb = text_emb.clone()
                 text_emb[~face_mask] = text_fb[~face_mask]
-        with torch.no_grad():
-            text_emb = pipe.text_encoder(**tok).last_hidden_state.to(dtype_unet)  # [B,T,D]
 
         # VAE encode -> latents
         with torch.no_grad():
@@ -510,18 +449,14 @@ def main(cfg_path: str):
 
         # Add diffusion noise
         noise = torch.randn_like(latents)
-        t = torch.randint(
-            0, scheduler.config.num_train_timesteps, (B,), device=device
-        ).long()
+        t = torch.randint(0, scheduler.config.num_train_timesteps, (B,), device=device).long()
         noisy = scheduler.add_noise(latents, noise, t).to(dtype=dtype_unet)
 
         # Conditioning tokens (from PIL)
         with torch.no_grad():
-            id_tokens = id_cond(pil_id, out_dtype=dtype_unet)
-        hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
+            id_tokens = id_cond(pil_id, out_dtype=dtype_unet)  # (B,n_tokens,cross_dim)
+        hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)  # (B,n_tokens,cross_dim)
 
-        
-        # token stats (печатаем только на первом шаге)
         if step == 0:
             def _stat(name, x):
                 x32 = x.detach().float()
@@ -532,10 +467,12 @@ def main(cfg_path: str):
                     f"mean_norm={x32.norm(dim=-1).mean().item():.4f}  "
                     f"max_norm={x32.norm(dim=-1).max().item():.4f}"
                 )
-        
-            _stat("text", text_emb)      # [B,T,D]
-            _stat("id", id_tokens)       # [B,N,D]
-            _stat("hair", hair_tokens)   # [B,N,D]
+
+            _stat("text", text_emb)      # [B,T,768]
+            _stat("id", id_tokens)       # [B,N,768]
+            _stat("hair", hair_tokens)   # [B,N,768]
+            print("[diag] B:", B)
+
         enc = {"text": text_emb, "id": id_tokens, "hair": hair_tokens}
 
         # Train step (predict noise)
@@ -555,8 +492,6 @@ def main(cfg_path: str):
         scaler.step(opt)
         scaler.update()
 
-        #step += 1
-
         if step % log_every == 0:
             print(f"[step {step}/{max_steps}] loss={loss.item():.6f}")
 
@@ -569,26 +504,19 @@ def main(cfg_path: str):
                 q_pil = qb["pil"]
                 qB = q_pixel.shape[0]
 
-                # eval_prompt = cfg.get("eval", {}).get("prompt", prompt)
-                # q_tok = pipe.tokenizer(
-                #     [eval_prompt] * qB,
-                #     padding="max_length",
-                #     max_length=pipe.tokenizer.model_max_length,
-                #     return_tensors="pt",
-                # ).to(device)
-
-                # with torch.no_grad():
-                #     q_text_emb = pipe.text_encoder(**q_tok).last_hidden_state.to(dtype_unet)
-
                 with torch.no_grad():
-                    # hair-less для ID как и в train
                     q_hair_masks = hair_cond.get_hair_masks(q_pil)
                     q_pil_id = [remove_hair_from_pil(im, q_hair_masks[i], fill=0.5) for i, im in enumerate(q_pil)]
-                
+
                     q_face_embs_512, q_face_mask = id_cond.extract_arcface_embs(q_pil_id, return_mask=True)
                     q_text_emb = project_face_embs(pipe, q_face_embs_512).to(dtype_unet)
-                
-                    # fallback на обычный текст, если нет лица
+
+                    if q_text_emb.shape[0] != qB:
+                        if q_text_emb.shape[0] == 1:
+                            q_text_emb = q_text_emb.repeat(qB, 1, 1)
+                        else:
+                            raise RuntimeError(f"q_text_emb batch mismatch: got {q_text_emb.shape[0]} vs qB={qB}")
+
                     if (~q_face_mask).any():
                         eval_prompt = cfg.get("eval", {}).get("prompt", "a portrait photo of a person")
                         q_tok_fb = pipe.tokenizer(
@@ -649,8 +577,8 @@ def main(cfg_path: str):
             out = run_dir / f"ckpt_step{step}.pt"
             torch.save(ckpt, out)
             print("Saved:", out)
-            
-        step += 1 #вот тут добавила!
+
+        step += 1
 
     print("Done. Run dir:", run_dir)
 
