@@ -35,6 +35,7 @@ from src.data.images import ImageFolderDataset
 from src.model.dual_ip_attention import DualImageAttnProcessor
 from src.model.id_conditioner_insightface import IDArcFaceConditioner
 from src.model.hair_conditioner_parsing import HairConditioner
+from src.model.hair_conditioner_parsing import remove_hair_from_pil
 
 def _maybe_display(path: str):
     try:
@@ -150,13 +151,18 @@ def qualitative_check(
     vae_sf = pipe.vae_scale_factor if hasattr(pipe, "vae_scale_factor") else 8
 
     # 1) Compute conditioning tokens ONCE
-    id_tokens, face_mask = id_cond(pil_images, out_dtype=dtype_unet, return_mask=True)
+    # remove hair from ID shortcut in eval too
+    hair_masks = hair_cond.get_hair_masks(pil_images)
+    pil_id = [remove_hair_from_pil(im, hair_masks[i], fill=0.5) for i, im in enumerate(pil_images)]
+    
+    id_tokens, face_mask = id_cond(pil_id, out_dtype=dtype_unet, return_mask=True)
     print("has_face:", face_mask.tolist())
+    
     hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
     print(
         f"[qual diag] mean|text|={text_emb.detach().float().abs().mean().item():.4f}  "
         f"mean|id|={id_tokens.detach().float().abs().mean().item():.4f}  "
-        f"mean|hair|={hair_tokens.detach().float().abs().mean().item():.4f}"
+        #f"mean|hair|={hair_tokens.detach().float().abs().mean().item():.4f}"
     )
     print(
         f"[qual diag] mean_norm text={text_emb.detach().float().norm(dim=-1).mean().item():.4f}  "
@@ -172,11 +178,11 @@ def qualitative_check(
         dtype=dtype_unet,
         generator=gen,
     )
-    old = []
-    for proc in pipe.unet.attn_processors.values():
-        if isinstance(proc, DualImageAttnProcessor):
-            old.append((proc, proc.scale_id))
-            proc.scale_id = 0.0
+    # old = []
+    # for proc in pipe.unet.attn_processors.values():
+    #     if isinstance(proc, DualImageAttnProcessor):
+    #         old.append((proc, proc.scale_id))
+    #         proc.scale_id = 0.0
     # 3) 4 variants (same noise, same text; only toggling id/hair)
     variants = [
         ("both_on",       id_tokens,                   hair_tokens,                  7.0),
@@ -526,7 +532,10 @@ def main(cfg_path: str):
 
         pixel_values = batch["pixel_values"].to(device=device, dtype=dtype_unet)  # [-1,1], fp16
         pil_images = batch["pil"]  # list[PIL]
-
+        # --- build hair-less images for ID branch (Step1: remove H from shortcut)
+        with torch.no_grad():
+            hair_masks = hair_cond.get_hair_masks(pil_images)  # (B,512,512)
+            pil_id = [remove_hair_from_pil(im, hair_masks[i], fill=0.5) for i, im in enumerate(pil_images)]
         B = pixel_values.shape[0]
 
         # ---- Text embedding (prompt)
@@ -555,8 +564,10 @@ def main(cfg_path: str):
 
         # ---- Conditioning tokens (from PIL)
         with torch.no_grad():
-            id_tokens = id_cond(pil_images, out_dtype=dtype_unet)
+            id_tokens = id_cond(pil_id, out_dtype=dtype_unet)
         hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
+
+        
         # ---- DIAG: token stats (печатаем только на первом шаге)
         if step == 0:
             def _stat(name, x):
