@@ -69,7 +69,7 @@ class InsightFaceArcFaceEmbedder:
 
 
 class IDArcFaceConditioner(nn.Module):
-    def __init__(self, n_tokens: int, cross_dim: int, device="cuda", proj_dtype=torch.float32):
+    def __init__(self, n_tokens: int, cross_dim: int, device="cuda", proj_dtype=torch.float32, model_root="/content"):
         super().__init__()
         self.device = device
         self.n_tokens = n_tokens
