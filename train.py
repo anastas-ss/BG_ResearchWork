@@ -359,6 +359,7 @@ def main(cfg_path: str):
         cross_dim=cross_dim,
         device=device,
         proj_dtype=torch.float32,
+        model_root="/content",
     ).to(device)
 
     hair_cond = HairConditioner(
