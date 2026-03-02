@@ -387,14 +387,14 @@ def main(cfg_path: str):
     
     hair_cond.requires_grad_(False)
     hair_cond.proj.requires_grad_(True)
-    # ---- Trainable params: ONLY hair projection + dual attention params
-    train_params = list(hair_cond.proj.parameters())
     
     for proc in unet.attn_processors.values():
         if isinstance(proc, DualImageAttnProcessor):
-            for p in proc.parameters():
-                p.requires_grad = True
-            train_params += list(proc.parameters())
+            # train only hair branch inside DualImageAttnProcessor
+            proc.to_k_id.requires_grad_(False)
+            proc.to_v_id.requires_grad_(False)
+            proc.to_k_hair.requires_grad_(True)
+            proc.to_v_hair.requires_grad_(True)
 
     # opt = torch.optim.AdamW(
     #     train_params,
@@ -404,7 +404,9 @@ def main(cfg_path: str):
     dual_params = []
     for proc in unet.attn_processors.values():
         if isinstance(proc, DualImageAttnProcessor):
-            dual_params += list(proc.parameters())
+            # только trainable параметры
+            dual_params += [p for p in proc.parameters() if p.requires_grad]
+    train_params = list(hair_cond.proj.parameters()) + dual_params
     
     opt = torch.optim.AdamW(
         [
