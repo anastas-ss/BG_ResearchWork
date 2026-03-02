@@ -349,8 +349,20 @@ def main(cfg_path: str):
         bg_value=float(cfg["cond"].get("hair_bg_value", 0.0)),
     ).to(device)
 
+    # ---- Data
+    ds = ImageFolderDataset(cfg["data"]["train_dir"], image_size=int(cfg["data"]["image_size"]))
+    dl = DataLoader(
+        ds,
+        batch_size=int(cfg["train"]["batch_size"]),
+        shuffle=True,
+        num_workers=int(cfg["train"].get("num_workers", 2)),
+        pin_memory=True,
+        collate_fn=collate_keep_pil,
+        drop_last=True,
+    )
+    
     from insightface.app import FaceAnalysis
-
+    
     # ... после создания id_cond/hair_cond
     if cfg.get("eval", {}).get("hair_leak_check", False):
         face_app = FaceAnalysis(name="buffalo_l")   # пока так; потом поменяем на antelopev2
@@ -386,18 +398,6 @@ def main(cfg_path: str):
 
     # AMP scaler (use torch.cuda.amp for broad compatibility)
     scaler = torch.cuda.amp.GradScaler(enabled=True)
-
-    # ---- Data
-    ds = ImageFolderDataset(cfg["data"]["train_dir"], image_size=int(cfg["data"]["image_size"]))
-    dl = DataLoader(
-        ds,
-        batch_size=int(cfg["train"]["batch_size"]),
-        shuffle=True,
-        num_workers=int(cfg["train"].get("num_workers", 2)),
-        pin_memory=True,
-        collate_fn=collate_keep_pil,
-        drop_last=True,
-    )
 
     # Fixed batch for eval
     fixed_batch = None
