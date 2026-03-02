@@ -114,7 +114,7 @@ def sample_with_cfg(
         # Пусть unet сам работает в своем dtype (fp16), а processor у тебя fp32 где надо.
         eps_u = pipe.unet(x_in, t_batch, encoder_hidden_states=enc_uncond).sample
         eps_c = pipe.unet(x_in, t_batch, encoder_hidden_states=enc_cond).sample
-
+        
         eps = eps_u + cfg_scale * (eps_c - eps_u)
 
         # step() получает "x" (НЕ x_in)
@@ -153,7 +153,16 @@ def qualitative_check(
     id_tokens, face_mask = id_cond(pil_images, out_dtype=dtype_unet, return_mask=True)
     print("has_face:", face_mask.tolist())
     hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
-
+    print(
+        f"[qual diag] mean|text|={text_emb.detach().float().abs().mean().item():.4f}  "
+        f"mean|id|={id_tokens.detach().float().abs().mean().item():.4f}  "
+        f"mean|hair|={hair_tokens.detach().float().abs().mean().item():.4f}"
+    )
+    print(
+        f"[qual diag] mean_norm text={text_emb.detach().float().norm(dim=-1).mean().item():.4f}  "
+        f"id={id_tokens.detach().float().norm(dim=-1).mean().item():.4f}  "
+        f"hair={hair_tokens.detach().float().norm(dim=-1).mean().item():.4f}"
+    )
     # 2) Fixed noise
     gen = torch.Generator(device=pixel_values.device)
     gen.manual_seed(int(seed))
@@ -185,7 +194,7 @@ def qualitative_check(
     for tag, id_t, hair_t, cfg_s in variants:
         enc_cond   = {"text": text_emb,    "id": id_t, "hair": hair_t}
         enc_uncond = {"text": text_emb_uc, "id": torch.zeros_like(id_t), "hair": torch.zeros_like(hair_t)}
-    
+        
         lat = sample_with_cfg(
             pipe=pipe,
             scheduler=scheduler,
@@ -320,7 +329,14 @@ def main(cfg_path: str):
 
     unet.set_attn_processor(attn_procs)
     print(f"[init] injected DualImageAttnProcessor into {n_cross} cross-attn blocks")
-
+    # ---- DIAG: убедиться, что extra K/V стартуют с нулей
+    for name, proc in unet.attn_processors.items():
+        if isinstance(proc, DualImageAttnProcessor):
+            print("[diag] to_k_id abs mean:", float(proc.to_k_id.weight.detach().abs().mean()))
+            print("[diag] to_v_id abs mean:", float(proc.to_v_id.weight.detach().abs().mean()))
+            print("[diag] to_k_hair abs mean:", float(proc.to_k_hair.weight.detach().abs().mean()))
+            print("[diag] to_v_hair abs mean:", float(proc.to_v_hair.weight.detach().abs().mean()))
+            break
     # ---- Freeze SD backbone
     pipe.vae.requires_grad_(False)
     pipe.text_encoder.requires_grad_(False)
@@ -520,6 +536,21 @@ def main(cfg_path: str):
         with torch.no_grad():
             id_tokens = id_cond(pil_images, out_dtype=dtype_unet)
         hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
+        # ---- DIAG: token stats (печатаем только на первом шаге)
+        if step == 0:
+            def _stat(name, x):
+                x32 = x.detach().float()
+                print(
+                    f"[diag] {name:>5}  shape={tuple(x.shape)}  "
+                    f"mean|x|={x32.abs().mean().item():.4f}  "
+                    f"rms={x32.pow(2).mean().sqrt().item():.4f}  "
+                    f"mean_norm={x32.norm(dim=-1).mean().item():.4f}  "
+                    f"max_norm={x32.norm(dim=-1).max().item():.4f}"
+                )
+        
+            _stat("text", text_emb)      # [B,T,D]
+            _stat("id", id_tokens)       # [B,N,D]
+            _stat("hair", hair_tokens)   # [B,N,D]
         enc = {"text": text_emb, "id": id_tokens, "hair": hair_tokens}
 
         # ---- Train step (predict noise)
