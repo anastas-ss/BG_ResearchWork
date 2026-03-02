@@ -40,11 +40,12 @@ def project_face_embs(pipeline, face_embs):
     token_embs[mask] = face_embs_padded.repeat_interleave(int(mask.sum(dim=1)[0].item()), dim=0)
 
     # ✅ FIX #2: вместо input_token_embs=...
-    prompt_embeds = pipeline.text_encoder(
-        input_ids=input_ids_b,          # ✅ обязателен для твоей версии transformers
-        inputs_embeds=token_embs,        # ✅ подменённые эмбеддинги
+    out = pipeline.text_encoder.text_model(
+        input_ids=input_ids_b,
         attention_mask=attention_mask_b,
+        inputs_embeds=token_embs,
         return_dict=True,
-    ).last_hidden_state
+    )
+    prompt_embeds = out.last_hidden_state
 
     return prompt_embeds
