@@ -89,7 +89,9 @@ class HairSegmentationEncoder(nn.Module):
             T.Normalize([0.485, 0.456, 0.406],
                         [0.229, 0.224, 0.225]),
         ])
-
+    @torch.no_grad()
+    def get_hair_masks(self, pil_images):
+        return self.enc_h(pil_images)  # (B,512,512) float {0,1}
     @torch.no_grad()
     def forward(self, pil_images):
         xs = [self.tf(im.convert("RGB")) for im in pil_images]
@@ -114,7 +116,21 @@ def apply_mask_to_pil(pil: Image.Image, mask_512: torch.Tensor, bg=0.0):
     out = arr * m3 + float(bg) * (1.0 - m3)
     out = (np.clip(out, 0, 1) * 255).astype(np.uint8)
     return Image.fromarray(out)
+    
+def remove_hair_from_pil(pil: Image.Image, mask_512: torch.Tensor, fill=0.5):
+    """
+    mask_512: (512,512) 1=hair, 0=not hair
+    Возвращает изображение, где hair регион закрашен fill (0..1).
+    """
+    im = pil.convert("RGB").resize((512, 512), Image.BILINEAR)
+    arr = np.array(im).astype(np.float32) / 255.0
 
+    m = mask_512.detach().cpu().numpy().astype(np.float32)  # 1=hair
+    m3 = np.stack([m, m, m], axis=-1)
+
+    out = arr * (1.0 - m3) + float(fill) * m3
+    out = (np.clip(out, 0, 1) * 255).astype(np.uint8)
+    return Image.fromarray(out)
 
 class HairConditioner(nn.Module):
     """
