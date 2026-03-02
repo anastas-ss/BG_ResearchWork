@@ -41,9 +41,8 @@ def project_face_embs(pipeline, face_embs):
 
     # ✅ FIX #2: вместо input_token_embs=...
     out = pipeline.text_encoder.text_model(
-        input_ids=input_ids_b,
+        inputs_embeds=token_embs,           # ✅ только inputs_embeds
         attention_mask=attention_mask_b,
-        inputs_embeds=token_embs,
         return_dict=True,
     )
     prompt_embeds = out.last_hidden_state
