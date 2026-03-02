@@ -9,7 +9,7 @@ import torch
 
 
 class InsightFaceArcFaceEmbedder:
-    def __init__(self, device="cuda", min_size=256, max_size=640, step=64, model_root="./"):
+    def __init__(self, device="cuda", min_size=256, max_size=640, step=64, model_root="/content"):
         ctx_id = 0 if device.startswith("cuda") else -1
         providers = (
             ["CUDAExecutionProvider", "CPUExecutionProvider"]
