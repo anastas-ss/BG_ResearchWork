@@ -162,7 +162,7 @@ def qualitative_check(
     print(
         f"[qual diag] mean|text|={text_emb.detach().float().abs().mean().item():.4f}  "
         f"mean|id|={id_tokens.detach().float().abs().mean().item():.4f}  "
-        #f"mean|hair|={hair_tokens.detach().float().abs().mean().item():.4f}"
+        f"mean|hair|={hair_tokens.detach().float().abs().mean().item():.4f}"
     )
     print(
         f"[qual diag] mean_norm text={text_emb.detach().float().norm(dim=-1).mean().item():.4f}  "
@@ -183,13 +183,13 @@ def qualitative_check(
     #     if isinstance(proc, DualImageAttnProcessor):
     #         old.append((proc, proc.scale_id))
     #         proc.scale_id = 0.0
+    #try:
     # 3) 4 variants (same noise, same text; only toggling id/hair)
     variants = [
-        ("both_on",       id_tokens,                   hair_tokens,                  7.0),
-        ("id_only_cfg1",  id_tokens,                   torch.zeros_like(hair_tokens), 1.0),
-        ("id_only_cfg3",  id_tokens,                   torch.zeros_like(hair_tokens), 3.0),
-        ("id_only_cfg7",  id_tokens,                   torch.zeros_like(hair_tokens), 7.0),
-        ("both_off",      torch.zeros_like(id_tokens), torch.zeros_like(hair_tokens), 7.0),
+        ("both_on",   id_tokens,                   hair_tokens,                   7.0),
+        ("id_only",   id_tokens,                   torch.zeros_like(hair_tokens), 7.0),
+        ("hair_only", torch.zeros_like(id_tokens), hair_tokens,                   7.0),
+        ("both_off",  torch.zeros_like(id_tokens), torch.zeros_like(hair_tokens), 7.0),
     ]
     # unconditional text (для CFG)
     tok_uc = pipe.tokenizer(
@@ -218,9 +218,9 @@ def qualitative_check(
     
         img_01 = _vae_decode_to_01(pipe, lat, dtype_unet)  # [B,3,H,W]
         rows.append(img_01[:1])  # первый в батче, чтобы получить 1хN grid
-
-    for proc, v in old:
-        proc.scale_id = v
+    # finally:
+    #     for proc, v in old:
+    #         proc.scale_id = v
     row = torch.cat(rows, dim=0)  # [4,3,H,W]
     path = out_dir / f"step_{step:07d}.png"
     _save_row(row, str(path))
