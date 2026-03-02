@@ -3,6 +3,7 @@ exp_name: method1_clip_shortcut
 seed: 42
 
 eval:
+  hair_leak_check: true
   sanity_compare: true
   prompt: "a portrait photo of a person"
   enabled: true
