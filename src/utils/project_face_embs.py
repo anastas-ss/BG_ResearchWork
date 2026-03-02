@@ -52,8 +52,8 @@ def project_face_embs(pipeline, face_embs):
         if len(id_pos) > 0:
             token_embs[i, id_pos[0]] = face_embs_padded[i]
 
-    # ---- 6. теперь запускаем НОРМАЛЬНЫЙ forward CLIP
-    outputs = text_encoder(
+    # ---- 6. теперь запускаем НОРМАЛЬНЫЙ forward CLIP через оригинальный CLIPTextModel
+    outputs = text_encoder.text_model(
         inputs_embeds=token_embs,
         attention_mask=attention_mask_b,
         return_dict=True,
