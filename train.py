@@ -392,12 +392,23 @@ def main(cfg_path: str):
                 p.requires_grad = True
             train_params += list(proc.parameters())
 
+    # opt = torch.optim.AdamW(
+    #     train_params,
+    #     lr=float(cfg["train"]["lr"]),
+    #     weight_decay=float(cfg["train"]["weight_decay"]),
+    # )
+    dual_params = []
+    for proc in unet.attn_processors.values():
+        if isinstance(proc, DualImageAttnProcessor):
+            dual_params += list(proc.parameters())
+    
     opt = torch.optim.AdamW(
-        train_params,
-        lr=float(cfg["train"]["lr"]),
+        [
+            {"params": list(hair_cond.proj.parameters()), "lr": float(cfg["train"]["lr"])},
+            {"params": dual_params, "lr": float(cfg["train"]["lr"]) * 0.05},
+        ],
         weight_decay=float(cfg["train"]["weight_decay"]),
     )
-
     def count_trainable(m):
         return sum(p.numel() for p in m.parameters() if p.requires_grad)
 
