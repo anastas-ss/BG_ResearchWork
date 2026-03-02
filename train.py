@@ -1,5 +1,4 @@
 # train.py
-# Full, corrected training script for:
 # - Stable Diffusion (frozen backbone)
 # - DualImageAttnProcessor injected into ALL cross-attn (attn2) blocks
 # - Two external condition streams: ID (ArcFace) and Hair (Parsing + CLIP)
@@ -52,9 +51,8 @@ def _print_png_base64(path: str, max_kb: int = 800):
         return
     b64 = base64.b64encode(data).decode("utf-8")
     print("data:image/png;base64," + b64)
-# -------------------------
+
 # Data collation (keep PIL)
-# -------------------------
 def collate_keep_pil(batch_list):
     pixel_values = torch.stack([b["pixel_values"] for b in batch_list], dim=0)  # [B,3,H,W] float
     pil = [b["pil"] for b in batch_list]  # list[PIL.Image]
@@ -62,9 +60,7 @@ def collate_keep_pil(batch_list):
     return {"pixel_values": pixel_values, "pil": pil, "path": path}
 
 
-# -------------------------
 # Helpers: decode/save/sample
-# -------------------------
 @torch.no_grad()
 def _vae_decode_to_01(pipe: StableDiffusionPipeline, latents: torch.Tensor, dtype_unet: torch.dtype):
     """
@@ -100,7 +96,7 @@ def sample_with_cfg(
     device = latents.device
     scheduler.set_timesteps(num_steps, device=device)
 
-    # ВАЖНО: для DPMSolver latents должны быть умножены на init_noise_sigma ОДИН РАЗ
+    # для DPMSolver latents должны быть умножены на init_noise_sigma
     latents = latents * scheduler.init_noise_sigma
     x = latents
 
@@ -108,17 +104,14 @@ def sample_with_cfg(
         t_int = int(t.item())
         t_batch = torch.full((x.shape[0],), t_int, device=device, dtype=torch.long)
 
-        # ВАЖНО: scale_model_input нужен для DPMSolver
+        # scale_model_input нужен для DPMSolver
         x_in = scheduler.scale_model_input(x, t)
 
-        # ВАЖНО: никаких autocast тут не надо насильно.
-        # Пусть unet сам работает в своем dtype (fp16), а processor у тебя fp32 где надо.
         eps_u = pipe.unet(x_in, t_batch, encoder_hidden_states=enc_uncond).sample
         eps_c = pipe.unet(x_in, t_batch, encoder_hidden_states=enc_cond).sample
         
         eps = eps_u + cfg_scale * (eps_c - eps_u)
 
-        # step() получает "x" (НЕ x_in)
         x = scheduler.step(eps, t, x).prev_sample
 
     return x
@@ -150,7 +143,6 @@ def qualitative_check(
     B, _, H, W = pixel_values.shape
     vae_sf = pipe.vae_scale_factor if hasattr(pipe, "vae_scale_factor") else 8
 
-    # 1) Compute conditioning tokens ONCE
     # remove hair from ID shortcut in eval too
     hair_masks = hair_cond.get_hair_masks(pil_images)
     pil_id = [remove_hair_from_pil(im, hair_masks[i], fill=0.5) for i, im in enumerate(pil_images)]
@@ -169,7 +161,7 @@ def qualitative_check(
         f"id={id_tokens.detach().float().norm(dim=-1).mean().item():.4f}  "
         f"hair={hair_tokens.detach().float().norm(dim=-1).mean().item():.4f}"
     )
-    # 2) Fixed noise
+    # Fixed noise
     gen = torch.Generator(device=pixel_values.device)
     gen.manual_seed(int(seed))
     latents0 = torch.randn(
@@ -227,58 +219,13 @@ def qualitative_check(
     print(f"[qual] saved {path}")
     _maybe_display(str(path))
 from PIL import Image
-
-# @torch.no_grad()
-# def sanity_sampling_compare(pipe, eval_scheduler, prompt="a portrait photo of a person", steps=30, seed=123):
-#     device = pipe.device
-#     dtype = next(pipe.unet.parameters()).dtype
-
-#     # --- 1) baseline: родной pipe (text-only)
-#     pipe.scheduler = eval_scheduler
-#     gen = torch.Generator(device=device).manual_seed(int(seed))
-#     img_pipe = pipe(prompt, num_inference_steps=int(steps), guidance_scale=7.0, generator=gen).images[0]
-#     img_pipe.save("sanity_pipe.png")
-
-#     # --- 2) твой sampler (text-only через dict)
-#     tok = pipe.tokenizer([prompt], padding="max_length",
-#                          max_length=pipe.tokenizer.model_max_length,
-#                          return_tensors="pt").to(device)
-#     text_emb = pipe.text_encoder(**tok).last_hidden_state.to(dtype)
-
-#     tok_uc = pipe.tokenizer([""], padding="max_length",
-#                             max_length=pipe.tokenizer.model_max_length,
-#                             return_tensors="pt").to(device)
-#     text_emb_uc = pipe.text_encoder(**tok_uc).last_hidden_state.to(dtype)
-
-#     # латенты 512x512 -> 64x64
-#     gen2 = torch.Generator(device=device).manual_seed(int(seed))
-#     latents0 = torch.randn((1, 4, 64, 64), device=device, dtype=dtype, generator=gen2)
-
-#     # пустые id/hair токены (важно: правильная форма)
-#     cross_dim = pipe.unet.config.cross_attention_dim
-#     zeros = torch.zeros((1, 1, cross_dim), device=device, dtype=dtype)
-
-#     enc_c = {"text": text_emb, "id": zeros, "hair": zeros}
-#     enc_u = {"text": text_emb_uc, "id": zeros, "hair": zeros}
-
-#     lat = sample_with_cfg(pipe, eval_scheduler, latents0, enc_c, enc_u, num_steps=int(steps), cfg_scale=7.0)
-#     img01 = _vae_decode_to_01(pipe, lat, dtype)[0]  # [3,H,W]
-
-#     out = torchvision.utils.make_grid(torch.stack([torchvision.transforms.ToTensor()(img_pipe), img01.cpu()], dim=0), nrow=2)
-#     torchvision.utils.save_image(out, "sanity_sampling.png")
-#     print("saved: sanity_pipe.png and sanity_sampling.png (left=pipe, right=custom)")
-
-# -------------------------
 # Config
-# -------------------------
 def load_cfg(path: str):
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
 
-# -------------------------
 # Main
-# -------------------------
 def main(cfg_path: str):
     cfg = load_cfg(cfg_path)
 
@@ -303,7 +250,7 @@ def main(cfg_path: str):
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=2))
     (run_dir / "config.yaml").write_text(Path(cfg_path).read_text())
 
-    # ---- Load Stable Diffusion
+    # Load Stable Diffusion
     pipe = StableDiffusionPipeline.from_pretrained(
         cfg["models"]["sd_model_id"],
         torch_dtype=torch.float16,
@@ -315,7 +262,7 @@ def main(cfg_path: str):
     dtype_unet = next(unet.parameters()).dtype  # fp16
     cross_dim = unet.config.cross_attention_dim
 
-    # ---- Inject DualImageAttnProcessor into ALL cross-attn blocks (attn2)
+    # Inject DualImageAttnProcessor into ALL cross-attn blocks (attn2)
     base_procs = unet.attn_processors
     attn_procs = {}
     n_cross = 0
@@ -342,7 +289,6 @@ def main(cfg_path: str):
 
     unet.set_attn_processor(attn_procs)
     print(f"[init] injected DualImageAttnProcessor into {n_cross} cross-attn blocks")
-    # ---- DIAG: убедиться, что extra K/V стартуют с нулей
     for name, proc in unet.attn_processors.items():
         if isinstance(proc, DualImageAttnProcessor):
             print("[diag] to_k_id abs mean:", float(proc.to_k_id.weight.detach().abs().mean()))
@@ -350,12 +296,12 @@ def main(cfg_path: str):
             print("[diag] to_k_hair abs mean:", float(proc.to_k_hair.weight.detach().abs().mean()))
             print("[diag] to_v_hair abs mean:", float(proc.to_v_hair.weight.detach().abs().mean()))
             break
-    # ---- Freeze SD backbone
+    # Freeze SD backbone
     pipe.vae.requires_grad_(False)
     pipe.text_encoder.requires_grad_(False)
     pipe.unet.requires_grad_(False)
 
-    # ---- Build conditioners (created ONCE)
+    # Build conditioners
     n_tokens = int(cfg["cond"]["n_tokens"])
     clip_id = cfg["models"]["clip_vision_id"]
     hair_w = cfg["models"]["hair_parsing_weights"]  # path to .pth
@@ -379,11 +325,11 @@ def main(cfg_path: str):
         bg_value=float(cfg["cond"].get("hair_bg_value", 0.0)),
     ).to(device)
     
-    # ---- Shortcut exp: FREEZE ID branch completely
+    # Shortcut exp: FREEZE ID branch completely
     id_cond.eval()
     id_cond.requires_grad_(False)
     
-    # ---- Data
+    # Data
     ds = ImageFolderDataset(cfg["data"]["train_dir"], image_size=int(cfg["data"]["image_size"]))
     dl = DataLoader(
         ds,
@@ -406,11 +352,6 @@ def main(cfg_path: str):
             proc.to_k_hair.requires_grad_(True)
             proc.to_v_hair.requires_grad_(True)
 
-    # opt = torch.optim.AdamW(
-    #     train_params,
-    #     lr=float(cfg["train"]["lr"]),
-    #     weight_decay=float(cfg["train"]["weight_decay"]),
-    # )
     dual_params = []
     for proc in unet.attn_processors.values():
         if isinstance(proc, DualImageAttnProcessor):
@@ -447,11 +388,11 @@ def main(cfg_path: str):
 
     from insightface.app import FaceAnalysis
     from src.utils.hair_leakage_check import hair_leakage_check_one
-    # ---- (DEBUG) hair leakage check: один раз перед train
+    # hair leakage check
     if cfg.get("eval", {}).get("hair_leak_check", False):
         face_app = FaceAnalysis(
             name="antelopev2",
-            root="/content",  # или "./" если models лежит рядом с train.py
+            root="/content", 
             providers=["CUDAExecutionProvider","CPUExecutionProvider"],
             allowed_modules=["detection", "recognition"],
         )
@@ -466,18 +407,10 @@ def main(cfg_path: str):
             pil=pil0,
             hair_cond=hair_cond,
             face_app=face_app,
-            arcface_embedder=id_cond.embedder,   # твой embedder
+            arcface_embedder=id_cond.embedder,
             out_prefix="leak",
         )
-    # if cfg.get("eval", {}).get("sanity_compare", False):
-    #     sanity_sampling_compare(
-    #         pipe, 
-    #         eval_scheduler, 
-    #         prompt=cfg.get("eval", {}).get("prompt", "a portrait photo of a person"),
-    #         steps=int(cfg["eval"].get("num_inference_steps", 30)),
-    #         seed=int(cfg["eval"].get("seed", 123)))
-    
-    # ---- SANITY: text-only sampling must look normal (NOT mosaic)
+
     if cfg.get("eval", {}).get("sanity_compare", False):
         pipe.scheduler = eval_scheduler
     
@@ -515,7 +448,7 @@ def main(cfg_path: str):
     log_every = int(cfg["train"]["log_every"])
     save_every = int(cfg["train"]["save_every"])
 
-    # ---- Modes
+    # Modes
     unet.train()      # only attn_processor params have requires_grad=True
     id_cond.eval()    # frozen branch stays in eval
     hair_cond.train() # projection trainable
@@ -532,13 +465,13 @@ def main(cfg_path: str):
 
         pixel_values = batch["pixel_values"].to(device=device, dtype=dtype_unet)  # [-1,1], fp16
         pil_images = batch["pil"]  # list[PIL]
-        # --- build hair-less images for ID branch (Step1: remove H from shortcut)
+        # build hair-less images for ID branch (Step1: remove H from shortcut)
         with torch.no_grad():
             hair_masks = hair_cond.get_hair_masks(pil_images)  # (B,512,512)
             pil_id = [remove_hair_from_pil(im, hair_masks[i], fill=0.5) for i, im in enumerate(pil_images)]
         B = pixel_values.shape[0]
 
-        # ---- Text embedding (prompt)
+        # Text embedding (prompt)
         prompt = cfg.get("train", {}).get("prompt", "a portrait photo of a person")
         tok = pipe.tokenizer(
             [prompt] * B,
@@ -550,25 +483,25 @@ def main(cfg_path: str):
         with torch.no_grad():
             text_emb = pipe.text_encoder(**tok).last_hidden_state.to(dtype_unet)  # [B,T,D]
 
-        # ---- VAE encode -> latents
+        # VAE encode -> latents
         with torch.no_grad():
             latents = pipe.vae.encode(pixel_values).latent_dist.sample()
             latents = latents * pipe.vae.config.scaling_factor  # [B,4,h,w]
 
-        # ---- Add diffusion noise
+        # Add diffusion noise
         noise = torch.randn_like(latents)
         t = torch.randint(
             0, scheduler.config.num_train_timesteps, (B,), device=device
         ).long()
         noisy = scheduler.add_noise(latents, noise, t).to(dtype=dtype_unet)
 
-        # ---- Conditioning tokens (from PIL)
+        # Conditioning tokens (from PIL)
         with torch.no_grad():
             id_tokens = id_cond(pil_id, out_dtype=dtype_unet)
         hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
 
         
-        # ---- DIAG: token stats (печатаем только на первом шаге)
+        # token stats (печатаем только на первом шаге)
         if step == 0:
             def _stat(name, x):
                 x32 = x.detach().float()
@@ -585,7 +518,7 @@ def main(cfg_path: str):
             _stat("hair", hair_tokens)   # [B,N,D]
         enc = {"text": text_emb, "id": id_tokens, "hair": hair_tokens}
 
-        # ---- Train step (predict noise)
+        # Train step (predict noise)
         opt.zero_grad(set_to_none=True)
 
         with torch.cuda.amp.autocast(dtype=torch.float16):
@@ -607,7 +540,7 @@ def main(cfg_path: str):
         if step % log_every == 0:
             print(f"[step {step}/{max_steps}] loss={loss.item():.6f}")
 
-        # ---- Qualitative sampling
+        # Qualitative sampling
         if cfg.get("eval", {}).get("enabled", False):
             every = int(cfg["eval"].get("every_steps", 200))
             if step % every == 0:
@@ -658,7 +591,7 @@ def main(cfg_path: str):
                 if was_hair_train:
                     hair_cond.train()
 
-        # ---- Save checkpoint
+        # Save checkpoint
         if step % save_every == 0 or step == max_steps:
             ckpt = {
                 "step": step,
