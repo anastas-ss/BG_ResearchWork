@@ -172,6 +172,10 @@ def qualitative_check(
         dtype=dtype_unet,
         generator=gen,
     )
+    # TEMP DEBUG: disable ID branch contributions inside dual-attn
+    for proc in pipe.unet.attn_processors.values():
+        if isinstance(proc, DualImageAttnProcessor):
+            proc.scale_id = 0.0
     # 3) 4 variants (same noise, same text; only toggling id/hair)
     variants = [
         ("both_on",       id_tokens,                   hair_tokens,                  7.0),
