@@ -13,42 +13,34 @@ def project_face_embs(pipeline, face_embs):
     device = pipeline.device
     N = face_embs.shape[0]
 
-    # токенизируем промпт
-    text = "photo of a id person"
+    # Tokenize prompt
+    prompt = "photo of a id person"
     tok = tokenizer(
-        text,
+        prompt,
         truncation=True,
         padding="max_length",
         max_length=tokenizer.model_max_length,
         return_tensors="pt"
-    )
+    ).to(device)
 
-    input_ids = tok.input_ids.to(device)             # [1, T]
-    attention_mask = tok.attention_mask.to(device)  # [1, T]
-
-    # повторяем для батча
-    input_ids_b = input_ids.repeat(N, 1)            # [N, T]
+    input_ids = tok.input_ids      # [1, T]
+    attention_mask = tok.attention_mask  # [1, T]
+    input_ids_b = input_ids.repeat(N, 1)  # [N, T]
     attention_mask_b = attention_mask.repeat(N, 1)  # [N, T]
 
-    # получаем токен эмбеддинги напрямую через input_ids
-    token_embs_out = text_encoder(input_ids=input_ids_b, return_token_embs=True)
-    token_embs = token_embs_out.last_hidden_state  # теперь это [N, T, H] с dtype
+    # Get base embeddings
+    outputs = text_encoder(input_ids=input_ids_b, attention_mask=attention_mask_b, return_dict=True)
+    token_embs = outputs.last_hidden_state  # [N, T, H]
 
-    # находим позицию токена "id"
+    # Find index of "id" token
     arcface_token_id = tokenizer.encode("id", add_special_tokens=False)[0]
-    id_pos = (input_ids_b[0] == arcface_token_id).nonzero(as_tuple=True)[0].item()
+    id_pos = (input_ids[0] == arcface_token_id).nonzero(as_tuple=True)[0].item()
 
-    # расширяем face_embs до hidden_size и подменяем
-    hidden_size = text_encoder.config.hidden_size
+    # Pad face_embs to match hidden size
+    hidden_size = token_embs.shape[-1]
     face_embs_padded = F.pad(face_embs.to(device), (0, hidden_size - 512), "constant", 0)
+
+    # Replace token at id position
     token_embs[:, id_pos, :] = face_embs_padded
 
-    # forward через text_encoder только с inputs_embeds
-     outputs = text_encoder(
-        input_ids=input_ids_b,       # input_ids нужен для позиционных эмбеддингов
-        inputs_embeds=token_embs,
-        attention_mask=attention_mask_b,
-        return_dict=True
-    )
-
-    return outputs.last_hidden_state
+    return token_embs  # [N, T, H]
