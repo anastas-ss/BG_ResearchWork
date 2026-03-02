@@ -5,15 +5,15 @@ import torch.nn.functional as F
 def project_face_embs(pipeline, face_embs):
     """
     face_embs: (N, 512) normalized ArcFace embeddings
+    Returns CLIP text embeddings with 'id' token replaced by face embeddings.
     """
-
     device = pipeline.device
     tokenizer = pipeline.tokenizer
-    text_encoder = pipeline.text_encoder.text_model  # напрямую CLIPTextModel
+    text_encoder = pipeline.text_encoder.text_model  # CLIPTextModel
 
     N = face_embs.shape[0]
 
-    # ---- 1. tokenize prompt
+    # ---- 1. prompt
     text = "photo of a id person"
     tok = tokenizer(
         text,
@@ -30,16 +30,15 @@ def project_face_embs(pipeline, face_embs):
     input_ids_b = input_ids.repeat(N, 1)
     attention_mask_b = attention_mask.repeat(N, 1)
 
-    # ---- 3. токен эмбеддинги через text_model.embeddings
-    token_embs = text_encoder.embeddings.word_embeddings(input_ids_b)  # <-- исправлено
+    # ---- 3. токен эмбеддинги через embeddings.token_embedding
+    token_embs = text_encoder.embeddings.token_embedding(input_ids_b)
 
-    # ---- 4. подготовка face embeddings
+    # ---- 4. pad face embeddings до hidden_size
     hidden = text_encoder.config.hidden_size
-    face_embs = face_embs.to(device)
-    face_embs_padded = F.pad(face_embs, (0, hidden - 512), "constant", 0)
+    face_embs_padded = F.pad(face_embs.to(device), (0, hidden - 512), "constant", 0)
     face_embs_padded = face_embs_padded.to(dtype=token_embs.dtype)
 
-    # ---- 5. найти токен "id" и заменить
+    # ---- 5. заменить токен "id" на face embedding
     arcface_token_id = tokenizer.encode("id", add_special_tokens=False)[0]
     for i in range(N):
         id_pos = (input_ids_b[i] == arcface_token_id).nonzero(as_tuple=True)[0]
@@ -53,4 +52,4 @@ def project_face_embs(pipeline, face_embs):
         return_dict=True,
     )
 
-    return outputs.last_hidden_state
+    return outputs.last_hidden_state  # [B, T, hidden]
