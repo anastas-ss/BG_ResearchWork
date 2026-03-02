@@ -172,9 +172,10 @@ def qualitative_check(
         dtype=dtype_unet,
         generator=gen,
     )
-    # TEMP DEBUG: disable ID branch contributions inside dual-attn
+    old = []
     for proc in pipe.unet.attn_processors.values():
         if isinstance(proc, DualImageAttnProcessor):
+            old.append((proc, proc.scale_id))
             proc.scale_id = 0.0
     # 3) 4 variants (same noise, same text; only toggling id/hair)
     variants = [
@@ -212,6 +213,8 @@ def qualitative_check(
         img_01 = _vae_decode_to_01(pipe, lat, dtype_unet)  # [B,3,H,W]
         rows.append(img_01[:1])  # первый в батче, чтобы получить 1хN grid
 
+    for proc, v in old:
+        proc.scale_id = v
     row = torch.cat(rows, dim=0)  # [4,3,H,W]
     path = out_dir / f"step_{step:07d}.png"
     _save_row(row, str(path))
