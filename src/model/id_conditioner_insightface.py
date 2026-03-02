@@ -85,6 +85,29 @@ class IDArcFaceConditioner(nn.Module):
         ).to(device=device, dtype=proj_dtype)
 
     @torch.no_grad()
+    def extract_arcface_embs(self, pil_list, return_mask: bool = False, eps: float = 1e-12):
+        """
+        Returns:
+          embs: (B,512) torch on self.device, L2-normalized (float32)
+          mask: (B,) bool torch on self.device  (optional)
+        """
+        out = self.embedder(pil_list, return_mask=return_mask)
+    
+        if return_mask:
+            embs, mask = out
+            embs = embs.to(self.device, dtype=torch.float32)
+            mask = mask.to(self.device)
+        else:
+            embs = out.to(self.device, dtype=torch.float32)
+            mask = None
+    
+        # L2 normalize (ArcFace embeddings обычно уже близки к норм, но нормализуем гарантированно)
+        embs = embs / (embs.norm(dim=-1, keepdim=True).clamp_min(eps))
+    
+        if return_mask:
+            return embs, mask
+        return embs
+    @torch.no_grad()
     def _emb(self, pil_images, return_mask: bool = False):
         out = self.embedder(pil_images, return_mask=return_mask)
         if return_mask:
