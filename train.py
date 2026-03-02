@@ -134,16 +134,9 @@ def qualitative_check(
 
     face_mask = torch.ones(len(pil_images), device=pixel_values.device, dtype=torch.bool)
 
-    id_tokens = torch.zeros(
-        len(pil_images),
-        id_cond.n_tokens,
-        hair_tokens.shape[-1],
-        device=pixel_values.device,
-        dtype=dtype_unet,
-    )
-    print("has_face:", face_mask.tolist())
-
     hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
+    id_tokens = torch.zeros(len(pil_images), id_cond.n_tokens, hair_tokens.shape[-1], device=pixel_values.device, dtype=dtype_unet)
+    print("has_face:", face_mask.tolist())
 
     print(
         f"[qual diag] mean|text|={text_emb.detach().float().abs().mean().item():.4f}  "
