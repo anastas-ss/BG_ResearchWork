@@ -132,7 +132,15 @@ def qualitative_check(
     hair_masks = hair_cond.get_hair_masks(pil_images)
     pil_id = [remove_hair_from_pil(im, hair_masks[i], fill=0.5) for i, im in enumerate(pil_images)]
 
-    id_tokens, face_mask = id_cond(pil_id, out_dtype=dtype_unet, return_mask=True)
+    face_mask = torch.ones(len(pil_images), device=pixel_values.device, dtype=torch.bool)
+
+    id_tokens = torch.zeros(
+        len(pil_images),
+        id_cond.n_tokens,
+        hair_tokens.shape[-1],
+        device=pixel_values.device,
+        dtype=dtype_unet,
+    )
     print("has_face:", face_mask.tolist())
 
     hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
@@ -469,11 +477,19 @@ def main(cfg_path: str):
                 )
 
             _stat("text", text_emb)      # [B,T,768]
-            _stat("id", id_tokens)       # [B,N,768]
+            _stat("id", torch.zeros_like(hair_tokens))      # [B,N,768]
             _stat("hair", hair_tokens)   # [B,N,768]
             print("[diag] B:", B)
 
-        enc = {"text": text_emb, "id": torch.zeros_like(id_tokens), "hair": hair_tokens}
+        zero_id = torch.zeros(
+            B,
+            n_tokens,
+            cross_dim,
+            device=device,
+            dtype=dtype_unet,
+        )
+        
+        enc = {"text": text_emb, "id": zero_id, "hair": hair_tokens}
 
         # Train step (predict noise)
         opt.zero_grad(set_to_none=True)
