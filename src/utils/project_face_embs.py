@@ -44,7 +44,8 @@ def project_face_embs(pipeline, face_embs):
     token_embs[:, id_pos, :] = face_embs_padded
 
     # forward через text_encoder только с inputs_embeds
-    outputs = text_encoder(
+     outputs = text_encoder(
+        input_ids=input_ids_b,       # input_ids нужен для позиционных эмбеддингов
         inputs_embeds=token_embs,
         attention_mask=attention_mask_b,
         return_dict=True
