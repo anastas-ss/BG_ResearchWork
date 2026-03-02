@@ -54,6 +54,7 @@ def project_face_embs(pipeline, face_embs):
 
     # ---- 6. теперь запускаем НОРМАЛЬНЫЙ forward CLIP
     outputs = text_encoder(
+        input_ids=input_ids_b,              
         inputs_embeds=token_embs,
         attention_mask=attention_mask_b,
         return_dict=True,
