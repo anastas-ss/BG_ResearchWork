@@ -172,5 +172,6 @@ class HairConditioner(nn.Module):
 
     def forward(self, pil_images, out_dtype: torch.dtype):
         pooled = self._pooled_hair(pil_images)
+        pooled = pooled / (pooled.norm(dim=-1, keepdim=True) + 1e-6)
         tokens = self.proj(pooled.float()).view(-1, self.n_tokens, self.cross_dim)
         return tokens.to(dtype=out_dtype)
