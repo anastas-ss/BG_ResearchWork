@@ -89,9 +89,7 @@ class HairSegmentationEncoder(nn.Module):
             T.Normalize([0.485, 0.456, 0.406],
                         [0.229, 0.224, 0.225]),
         ])
-    @torch.no_grad()
-    def get_hair_masks(self, pil_images):
-        return self.enc_h(pil_images)  # (B,512,512) float {0,1}
+    
     @torch.no_grad()
     def forward(self, pil_images):
         xs = [self.tf(im.convert("RGB")) for im in pil_images]
@@ -174,6 +172,10 @@ class HairConditioner(nn.Module):
             nn.Linear(in_dim, self.n_tokens * self.cross_dim),
         ).to(device=device, dtype=proj_dtype)
 
+    @torch.no_grad()
+    def get_hair_masks(self, pil_images):
+        return self.enc_h(pil_images)  # (B,512,512) float {0,1}
+    
     @torch.no_grad()
     def _pooled_hair(self, pil_images):
         masks = self.enc_h(pil_images)  # (B,512,512)
