@@ -31,19 +31,19 @@ class HairSegmentationEncoder(nn.Module):
         if not isinstance(sd, dict):
             raise ValueError(f"Unsupported weights format: {type(sd)}")
 
-        # 1) убрать DataParallel префикс
+        # убираем DataParallel префикс
         sd = {k.replace("module.", ""): v for k, v in sd.items()}
         sd = {k: v for k, v in sd.items() if isinstance(v, torch.Tensor)}
         
         def _remap_key(k: str) -> str:
             nk = k
         
-            # 0) убрать частые верхние префиксы (разные repo сохраняют как model./net./bisenet.)
+            # 0) убираем частые верхние префиксы (разные repo сохраняют как model./net./bisenet.)
             for prefix in ("model.", "bisenet.", "net."):
                 if nk.startswith(prefix):
                     nk = nk[len(prefix):]
         
-            # A) нормализуем backbone / context_path
+            # нормализуем backbone / context_path
             if nk.startswith("context_path.resnet."):
                 nk = "cp.backbone." + nk[len("context_path.resnet."):]
             elif nk.startswith("context_path.backbone."):
@@ -56,7 +56,7 @@ class HairSegmentationEncoder(nn.Module):
             elif nk.startswith("backbone."):
                 nk = "cp.backbone." + nk[len("backbone."):]
         
-            # B) привести conv1/bn1 к твоей структуре (Sequential(conv,bn,relu))
+            # приводим conv1/bn1 к твоей структуре (Sequential(conv,bn,relu))
             if nk == "cp.backbone.conv1.weight":
                 nk = "cp.backbone.conv1.0.weight"
         
@@ -65,13 +65,13 @@ class HairSegmentationEncoder(nn.Module):
         
             return nk
 
-        # 2) применить ремап
+        # ремап
         remapped = {}
         for k, v in sd.items():
             remapped[_remap_key(k)] = v
         sd = remapped
 
-        # 3) загрузить
+        # загрузить
         missing, unexpected = self.net.load_state_dict(sd, strict=False)
         if len(missing) or len(unexpected):
             print("[HairSegEnc] load_state_dict strict=False")
