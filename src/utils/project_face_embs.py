@@ -46,8 +46,11 @@ def project_face_embs(pipeline, face_embs):
     arcface_token_id = tokenizer.encode("id", add_special_tokens=False)[0]
     mask = (input_ids_b == arcface_token_id)
 
-    # ---- 5. заменить embedding только в embedding matrix
-    token_embs[mask] = face_embs_padded.view(-1)
+    # ---- 5. заменить embedding токена "id" ПО БАТЧУ
+    for i in range(N):
+        id_pos = (input_ids_b[i] == arcface_token_id).nonzero(as_tuple=True)[0]
+        if len(id_pos) > 0:
+            token_embs[i, id_pos[0]] = face_embs_padded[i]
 
     # ---- 6. теперь запускаем НОРМАЛЬНЫЙ forward CLIP
     outputs = text_encoder(
