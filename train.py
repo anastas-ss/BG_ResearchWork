@@ -209,11 +209,13 @@ def qualitative_check(
         )
     
         img_01 = _vae_decode_to_01(pipe, lat, dtype_unet)  # [B,3,H,W]
-        rows.append(img_01[:1])  # первый в батче, чтобы получить 1хN grid
+        rows.append(img_01[:1]) 
+    orig_01 = (pixel_values[:1].float() * 0.5 + 0.5).clamp(0, 1)
+    row = torch.cat([orig_01] + rows, dim=0) 
     # finally:
     #     for proc, v in old:
     #         proc.scale_id = v
-    row = torch.cat(rows, dim=0)  # [4,3,H,W]
+
     path = out_dir / f"step_{step:07d}.png"
     _save_row(row, str(path))
     print(f"[qual] saved {path}")
