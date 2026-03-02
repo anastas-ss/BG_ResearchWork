@@ -5,7 +5,7 @@ seed: 42
 eval:
   hair_leak_check: true
   sanity_compare: true
-  prompt: "a portrait photo of a person"
+  #prompt: "a portrait photo of a person"
   enabled: true
   every_steps: 200
   seed: 123
