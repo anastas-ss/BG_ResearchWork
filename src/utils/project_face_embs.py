@@ -32,7 +32,9 @@ def project_face_embs(pipeline, face_embs):
 
     # ✅ FIX #1: вместо return_token_embs=True
     token_embs = pipeline.text_encoder.get_input_embeddings()(input_ids_b)  # (N,T,H)
-
+    
+    # ✅ FIX: привести dtype источника к dtype назначения (обычно fp16)
+    face_embs_padded = face_embs_padded.to(dtype=token_embs.dtype)
     # replace embeddings at "id"
     mask = (input_ids_b == arcface_token_id)
     token_embs[mask] = face_embs_padded.repeat_interleave(int(mask.sum(dim=1)[0].item()), dim=0)
