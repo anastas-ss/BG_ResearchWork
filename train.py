@@ -60,7 +60,7 @@ def sanity_check_tokens(pipe, id_cond, hair_cond, dl, dtype_unet, n_samples=4):
 
     # ID tokens
     face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_images, return_mask=True)
-    id_tokens = id_cond.proj(face_embs_512.to(id_cond.proj.weight.dtype))
+    id_tokens = id_cond.proj(face_embs_512.float())
     id_tokens = id_tokens.view(B, id_cond.n_tokens, pipe.unet.config.cross_attention_dim)
 
     # Hair tokens
