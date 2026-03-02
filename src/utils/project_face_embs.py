@@ -13,21 +13,36 @@ def project_face_embs(pipeline, face_embs):
 
     arcface_token_id = pipeline.tokenizer.encode("id", add_special_tokens=False)[0]
 
-    input_ids = pipeline.tokenizer(
-            "photo of a id person",
-            truncation=True,
-            padding="max_length",
-            max_length=pipeline.tokenizer.model_max_length,
-            return_tensors="pt",
-        ).input_ids.to(pipeline.device)
+    tok = pipeline.tokenizer(
+        "photo of a id person",
+        truncation=True,
+        padding="max_length",
+        max_length=pipeline.tokenizer.model_max_length,
+        return_tensors="pt",
+    )
+    input_ids = tok.input_ids.to(pipeline.device)              
+    attention_mask = tok.attention_mask.to(pipeline.device)   
+    
+    N = len(face_embs)
+    input_ids_b = input_ids.repeat(N, 1)
+    attention_mask_b = attention_mask.repeat(N, 1)
 
-    face_embs_padded = F.pad(face_embs, (0, pipeline.text_encoder.config.hidden_size-512), "constant", 0)
-    token_embs = pipeline.text_encoder(input_ids=input_ids.repeat(len(face_embs), 1), return_token_embs=True)
-    token_embs[input_ids==arcface_token_id] = face_embs_padded
+    hidden = pipeline.text_encoder.config.hidden_size
+    face_embs_padded = F.pad(face_embs, (0, hidden - 512), "constant", 0)
 
+    # ✅ FIX #1: вместо return_token_embs=True
+    token_embs = pipeline.text_encoder.get_input_embeddings()(input_ids_b)  # (N,T,H)
+
+    # replace embeddings at "id"
+    mask = (input_ids_b == arcface_token_id)
+    token_embs[mask] = face_embs_padded.repeat_interleave(int(mask.sum(dim=1)[0].item()), dim=0)
+
+    # ✅ FIX #2: вместо input_token_embs=...
     prompt_embeds = pipeline.text_encoder(
-        input_ids=input_ids,
-        input_token_embs=token_embs
-    )[0]
+        input_ids=None,
+        inputs_embeds=token_embs,
+        attention_mask=attention_mask_b,
+        return_dict=True,
+    ).last_hidden_state
 
     return prompt_embeds
