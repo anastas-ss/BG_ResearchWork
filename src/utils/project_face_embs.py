@@ -36,15 +36,22 @@ def project_face_embs(pipeline, face_embs):
     # ✅ FIX: привести dtype источника к dtype назначения (обычно fp16)
     face_embs_padded = face_embs_padded.to(dtype=token_embs.dtype)
     # replace embeddings at "id"
+    # replace embeddings at "id"
     mask = (input_ids_b == arcface_token_id)
     token_embs[mask] = face_embs_padded.repeat_interleave(int(mask.sum(dim=1)[0].item()), dim=0)
-
-    # ✅ FIX #2: вместо input_token_embs=...
-    out = pipeline.text_encoder.text_model(
-        inputs_embeds=token_embs,           # ✅ только inputs_embeds
-        attention_mask=attention_mask_b,
+    
+    # --- manual CLIPTextTransformer forward (robust) ---
+    text_model = pipeline.text_encoder.text_model
+    
+    attn = attention_mask_b
+    attn = (1.0 - attn.float()) * -10000.0
+    attn = attn[:, None, None, :]  # (N,1,1,T)
+    
+    enc_out = text_model.encoder(
+        inputs_embeds=token_embs,
+        attention_mask=attn,
         return_dict=True,
     )
-    prompt_embeds = out.last_hidden_state
-
+    
+    prompt_embeds = text_model.final_layer_norm(enc_out.last_hidden_state)
     return prompt_embeds
