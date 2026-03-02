@@ -46,6 +46,41 @@ def collate_keep_pil(batch_list):
     path = [b["path"] for b in batch_list]
     return {"pixel_values": pixel_values, "pil": pil, "path": path}
 
+@torch.no_grad()
+def sanity_check_tokens(pipe, id_cond, hair_cond, dl, dtype_unet, n_samples=4):
+    """
+    Проверяем, что:
+    1) ID токены ненулевые и frozen
+    2) Hair токены ненулевые и trainable
+    3) Выводим mean и norm для проверки
+    """
+    batch = next(iter(dl))
+    pil_images = batch["pil"][:n_samples]
+    B = len(pil_images)
+
+    # ID tokens
+    face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_images, return_mask=True)
+    id_tokens = id_cond.proj(face_embs_512.to(id_cond.proj.weight.dtype))
+    id_tokens = id_tokens.view(B, id_cond.n_tokens, pipe.unet.config.cross_attention_dim)
+
+    # Hair tokens
+    hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
+
+    print("\n=== Sanity Check Tokens ===")
+    print(f"face_mask: {face_mask.tolist()}")
+    print(f"ID tokens mean abs: {id_tokens.abs().mean().item():.4f}, norm mean: {id_tokens.norm(dim=-1).mean().item():.4f}")
+    print(f"Hair tokens mean abs: {hair_tokens.abs().mean().item():.4f}, norm mean: {hair_tokens.norm(dim=-1).mean().item():.4f}")
+
+    # Проверка заморозки
+    id_grad = any(p.requires_grad for p in id_cond.parameters())
+    hair_grad = any(p.requires_grad for p in hair_cond.parameters())
+    print(f"ID conditioner trainable? {id_grad} (должно быть False)")
+    print(f"Hair conditioner trainable? {hair_grad} (должно быть True)")
+
+    # Пример: нулевые ID для отсутствующих лиц
+    if (~face_mask).any():
+        print("Нулевая fallback подставлена для отсутствующих лиц:", (~face_mask).any())
+
 
 @torch.no_grad()
 def _vae_decode_to_01(pipe: StableDiffusionPipeline, latents: torch.Tensor, dtype_unet: torch.dtype):
@@ -337,6 +372,8 @@ def main(cfg_path: str):
         collate_fn=collate_keep_pil,
         drop_last=True,
     )
+    # Пример вызова после инициализации моделей и DataLoader:
+    sanity_check_tokens(pipe, id_cond, hair_cond, dl, dtype_unet)
 
     # Train only hair projection + hair branch inside DualImageAttnProcessor
     hair_cond.requires_grad_(False)
