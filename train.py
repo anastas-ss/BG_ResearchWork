@@ -551,16 +551,27 @@ def main(cfg_path: str):
                 q_pil = qb["pil"]
                 qB = q_pixel.shape[0]
 
-                eval_prompt = cfg.get("eval", {}).get("prompt", prompt)
-                q_tok = pipe.tokenizer(
-                    [eval_prompt] * qB,
-                    padding="max_length",
-                    max_length=pipe.tokenizer.model_max_length,
-                    return_tensors="pt",
-                ).to(device)
+                # eval_prompt = cfg.get("eval", {}).get("prompt", prompt)
+                # q_tok = pipe.tokenizer(
+                #     [eval_prompt] * qB,
+                #     padding="max_length",
+                #     max_length=pipe.tokenizer.model_max_length,
+                #     return_tensors="pt",
+                # ).to(device)
+
+                # with torch.no_grad():
+                #     q_text_emb = pipe.text_encoder(**q_tok).last_hidden_state.to(dtype_unet)
 
                 with torch.no_grad():
-                    q_text_emb = pipe.text_encoder(**q_tok).last_hidden_state.to(dtype_unet)
+                    # делаем hair-less картинки для ID (как в train)
+                    q_hair_masks = hair_cond.get_hair_masks(q_pil)
+                    q_pil_id = [remove_hair_from_pil(im, q_hair_masks[i], fill=0.5) for i, im in enumerate(q_pil)]
+                
+                    # TODO: получить (qB,512) ArcFace для q_pil_id
+                    # face_embs_512_q = id_cond.extract_arcface_embs(q_pil_id)
+                    # или face_embs_512_q = id_cond.embedder(q_pil_id)
+                
+                    q_text_emb = project_face_embs(pipe, face_embs_512_q).to(dtype_unet)
 
                 # switch to eval for sampling
                 was_unet_train = unet.training
