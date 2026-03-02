@@ -9,7 +9,7 @@ def project_face_embs(pipeline, face_embs):
 
     device = pipeline.device
     tokenizer = pipeline.tokenizer
-    text_encoder = pipeline.text_encoder.text_model  # <-- напрямую CLIPTextModel!
+    text_encoder = pipeline.text_encoder.text_model  # напрямую CLIPTextModel
 
     N = face_embs.shape[0]
 
@@ -26,12 +26,12 @@ def project_face_embs(pipeline, face_embs):
     input_ids = tok.input_ids.to(device)
     attention_mask = tok.attention_mask.to(device)
 
-    # ---- 2. повторяем под batch
+    # ---- 2. repeat для батча
     input_ids_b = input_ids.repeat(N, 1)
     attention_mask_b = attention_mask.repeat(N, 1)
 
-    # ---- 3. стандартные токен-эмбеддинги
-    token_embs = text_encoder.get_input_embeddings()(input_ids_b)
+    # ---- 3. токен эмбеддинги через text_model.embeddings
+    token_embs = text_encoder.embeddings.word_embeddings(input_ids_b)  # <-- исправлено
 
     # ---- 4. подготовка face embeddings
     hidden = text_encoder.config.hidden_size
@@ -39,14 +39,14 @@ def project_face_embs(pipeline, face_embs):
     face_embs_padded = F.pad(face_embs, (0, hidden - 512), "constant", 0)
     face_embs_padded = face_embs_padded.to(dtype=token_embs.dtype)
 
-    # ---- 5. находим токен "id" и заменяем
+    # ---- 5. найти токен "id" и заменить
     arcface_token_id = tokenizer.encode("id", add_special_tokens=False)[0]
     for i in range(N):
         id_pos = (input_ids_b[i] == arcface_token_id).nonzero(as_tuple=True)[0]
         if len(id_pos) > 0:
             token_embs[i, id_pos[0]] = face_embs_padded[i]
 
-    # ---- 6. forward напрямую через text_model
+    # ---- 6. forward через text_model
     outputs = text_encoder(
         inputs_embeds=token_embs,
         attention_mask=attention_mask_b,
