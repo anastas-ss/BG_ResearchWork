@@ -1,7 +1,7 @@
 
-
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class DualImageAttnProcessor(nn.Module):
     def __init__(
@@ -76,14 +76,36 @@ class DualImageAttnProcessor(nn.Module):
             **kwargs
         )
 
+        # --- FIX: make shapes consistent between base_out and id/hair branches ---
+        # Some diffusers blocks pass hidden_states as 4D (B,C,H,W), while attention math expects 3D (B,L,C).
+        # Base processor handles reshaping internally; we must mirror it so seq_len matches.
+        
+        hs = hidden_states
+        is_4d = (hs.dim() == 4)
+        if is_4d:
+            b, c, h, w = hs.shape
+            hs_3d = hs.permute(0, 2, 3, 1).reshape(b, h * w, c)  # (B, L, C)
+        else:
+            hs_3d = hs  # (B, L, C)
+        
+        # base_out can be 4D or 3D depending on block; convert to 3D for addition
+        bo = base_out
+        if bo.dim() == 4:
+            b2, c2, h2, w2 = bo.shape
+            bo_3d = bo.permute(0, 2, 3, 1).reshape(b2, h2 * w2, c2)  # (B, L, C)
+            bo_hw = (h2, w2, c2)
+        else:
+            bo_3d = bo
+            bo_hw = None
+        
+        out_dtype = bo_3d.dtype
+        result = bo_3d
+        
         if (self.scale_id == 0.0) and (self.scale_hair == 0.0):
             return base_out
 
-        out_dtype = base_out.dtype
-        result = base_out
-
-        # shared query
-        query = attn.to_q(hidden_states)
+        # shared query (use reshaped hs_3d so seq_len matches base_out)
+        query = attn.to_q(hs_3d)
         query = attn.head_to_batch_dim(query)
         query_ = query.float() if self.attn_fp32 else query
 
@@ -120,5 +142,9 @@ class DualImageAttnProcessor(nn.Module):
             out_h = attn.to_out[1](attn.to_out[0](out_h))
 
             result = result + self.scale_hair * out_h
+        # restore original base_out shape if needed
+        if bo_hw is not None:
+            h2, w2, c2 = bo_hw
+            result = result.reshape(-1, h2, w2, c2).permute(0, 3, 1, 2).contiguous()  # (B,C,H,W)
 
         return result
