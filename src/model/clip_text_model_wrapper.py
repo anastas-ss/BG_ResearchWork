@@ -62,9 +62,11 @@ class CLIPTextModelWrapper(CLIPTextModel):
         )
         causal_attention_mask = torch.triu(causal_attention_mask, diagonal=1)
         if attention_mask is not None:
-            # Convert [B,S] with 1=keep,0=mask to additive [B,1,1,S] mask.
+            # Convert [B,S] with 1=keep,0=mask to additive [B,1,S,S] mask.
+            # Some transformers versions validate exact 4D shape in CLIPAttention.
             attention_mask = attention_mask[:, None, None, :].to(dtype=hidden_states.dtype)
             attention_mask = (1.0 - attention_mask) * min_val
+            attention_mask = attention_mask.expand(bsz, 1, seq_len, seq_len)
 
         encoder_outputs = self.text_model.encoder(
             inputs_embeds=hidden_states,
