@@ -520,6 +520,8 @@ def main(cfg_path: str):
         float(cfg["train"].get("cross_hair_clip_weight", 0.0)),
         "cross_hair_clip_every=",
         int(cfg["train"].get("cross_hair_clip_every", 1)),
+        "cross_hair_clip_batch=",
+        int(cfg["train"].get("cross_hair_clip_batch", 2)),
     )
 
     scaler = torch.amp.GradScaler("cuda", enabled=True)
@@ -636,20 +638,39 @@ def main(cfg_path: str):
         # Сборка conditioning
         enc = {"text": text_emb, "id": id_tokens, "hair": hair_tokens}
         enc_hair_only = {"text": text_emb_empty, "id": id_tokens, "hair": hair_tokens}
-        enc_cross = {"text": text_emb, "id": id_tokens, "hair": hair_tokens_cross}
         hair_aux_weight = float(cfg["train"].get("hair_aux_weight", 0.0))
         cross_hair_clip_weight = float(cfg["train"].get("cross_hair_clip_weight", 0.0))
         cross_hair_clip_every = int(cfg["train"].get("cross_hair_clip_every", 1))
-        need_cross_clip = (cross_hair_clip_weight > 0.0) and (step % max(1, cross_hair_clip_every) == 0)
+        cross_hair_clip_batch = int(cfg["train"].get("cross_hair_clip_batch", 2))
+        need_cross_clip = (
+            (cross_hair_clip_weight > 0.0)
+            and (B >= 2)
+            and (step % max(1, cross_hair_clip_every) == 0)
+        )
 
         # reference hair CLIP embeddings from source B (detached target)
         if need_cross_clip:
             with torch.no_grad():
+                # memory saver: compute cross loss only on a random subset of batch
+                cross_bs = min(B, max(1, cross_hair_clip_batch))
+                if cross_bs < B:
+                    cross_idx = torch.randperm(B, device=device)[:cross_bs]
+                else:
+                    cross_idx = torch.arange(B, device=device)
+
+                noisy_cross = noisy[cross_idx]
+                t_cross = t[cross_idx]
+                enc_cross = {
+                    "text": text_emb[cross_idx],
+                    "id": id_tokens[cross_idx],
+                    "hair": hair_tokens_cross[cross_idx],
+                }
+
                 ref_pooled = hair_cond._pooled_hair(pil_images).detach().float()     # [B, D]
-                ref_pooled = ref_pooled[src_idx]                                      # [B, D]
+                ref_pooled = ref_pooled[src_idx][cross_idx]                           # [Bc, D]
                 ref_pooled = ref_pooled / (ref_pooled.norm(dim=-1, keepdim=True) + 1e-6)
                 hair_masks = hair_cond.get_hair_masks(pil_images).detach()            # [B,512,512]
-                hair_masks = hair_masks[src_idx].unsqueeze(1).to(device=device, dtype=torch.float32)
+                hair_masks = hair_masks[src_idx][cross_idx].unsqueeze(1).to(device=device, dtype=torch.float32)
 
         # Train step (predict noise)
         opt.zero_grad(set_to_none=True)
@@ -666,14 +687,15 @@ def main(cfg_path: str):
                 loss_hair = torch.zeros((), device=device, dtype=loss_main.dtype)
 
             if need_cross_clip:
-                noise_pred_cross = pipe.unet(noisy, t, encoder_hidden_states=enc_cross).sample
+                noise_pred_cross = pipe.unet(noisy_cross, t_cross, encoder_hidden_states=enc_cross).sample
             else:
                 noise_pred_cross = None
 
         if need_cross_clip:
             # Predict x0 from eps-prediction and compute CLIP similarity on hair-masked generated image.
-            alpha_t = scheduler.alphas_cumprod.to(device=noisy.device, dtype=torch.float32)[t].view(B, 1, 1, 1)
-            x0_cross = (noisy.float() - (1.0 - alpha_t).sqrt() * noise_pred_cross.float()) / alpha_t.sqrt()
+            b_cross = noisy_cross.shape[0]
+            alpha_t = scheduler.alphas_cumprod.to(device=noisy.device, dtype=torch.float32)[t_cross].view(b_cross, 1, 1, 1)
+            x0_cross = (noisy_cross.float() - (1.0 - alpha_t).sqrt() * noise_pred_cross.float()) / alpha_t.sqrt()
             x0_cross = x0_cross.to(dtype=dtype_unet)
             img_cross = pipe.vae.decode(x0_cross / pipe.vae.config.scaling_factor).sample  # [-1,1]
             img_cross_01 = (img_cross.float() * 0.5 + 0.5).clamp(0, 1)
