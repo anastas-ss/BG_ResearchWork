@@ -522,6 +522,8 @@ def main(cfg_path: str):
         int(cfg["train"].get("cross_hair_clip_every", 1)),
         "cross_hair_clip_batch=",
         int(cfg["train"].get("cross_hair_clip_batch", 2)),
+        "cross_hair_decode_size=",
+        int(cfg["train"].get("cross_hair_decode_size", 256)),
     )
 
     scaler = torch.amp.GradScaler("cuda", enabled=True)
@@ -642,6 +644,7 @@ def main(cfg_path: str):
         cross_hair_clip_weight = float(cfg["train"].get("cross_hair_clip_weight", 0.0))
         cross_hair_clip_every = int(cfg["train"].get("cross_hair_clip_every", 1))
         cross_hair_clip_batch = int(cfg["train"].get("cross_hair_clip_batch", 2))
+        cross_hair_decode_size = int(cfg["train"].get("cross_hair_decode_size", 256))
         need_cross_clip = (
             (cross_hair_clip_weight > 0.0)
             and (B >= 2)
@@ -697,7 +700,13 @@ def main(cfg_path: str):
             alpha_t = scheduler.alphas_cumprod.to(device=noisy.device, dtype=torch.float32)[t_cross].view(b_cross, 1, 1, 1)
             x0_cross = (noisy_cross.float() - (1.0 - alpha_t).sqrt() * noise_pred_cross.float()) / alpha_t.sqrt()
             x0_cross = x0_cross.to(dtype=dtype_unet)
-            img_cross = pipe.vae.decode(x0_cross / pipe.vae.config.scaling_factor).sample  # [-1,1]
+
+            decode_lat = x0_cross
+            if 64 <= cross_hair_decode_size < 512 and (cross_hair_decode_size % 8 == 0):
+                lat_sz = cross_hair_decode_size // 8
+                decode_lat = F.interpolate(decode_lat, size=(lat_sz, lat_sz), mode="bilinear", align_corners=False)
+
+            img_cross = pipe.vae.decode(decode_lat / pipe.vae.config.scaling_factor).sample  # [-1,1]
             img_cross_01 = (img_cross.float() * 0.5 + 0.5).clamp(0, 1)
 
             if hair_masks.shape[-2:] != img_cross_01.shape[-2:]:

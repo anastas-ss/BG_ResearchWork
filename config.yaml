@@ -31,13 +31,14 @@ cond:
   hair_class: 17
 
 train:
-  batch_size: 4
+  batch_size: 2
   lr: 7e-5
   dual_lr_mult: 1.5
   hair_aux_weight: 0.5
   cross_hair_clip_weight: 0.2
-  cross_hair_clip_every: 4
-  cross_hair_clip_batch: 2
+  cross_hair_clip_every: 8
+  cross_hair_clip_batch: 1
+  cross_hair_decode_size: 256
   weight_decay: 0.0
   max_steps: 5000
   log_every: 25
