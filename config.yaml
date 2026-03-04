@@ -32,7 +32,9 @@ cond:
 
 train:
   batch_size: 2
-  lr: 5e-5
+  lr: 7e-5
+  dual_lr_mult: 1.5
+  hair_aux_weight: 0.3
   weight_decay: 0.0
   max_steps: 5000
   log_every: 25

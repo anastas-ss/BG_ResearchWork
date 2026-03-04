@@ -199,7 +199,7 @@ def qualitative_check(
 ):
     """
     Saves: runs/<exp>/samples/step_XXXXXXX.png
-    Row: [orig | both_on | id_only | hair_only | both_off | cross_hair(optional)]
+    Row: [orig | both_on | id_only | hair_only | both_off | cross_hair(optional) | hair_source_B(optional)]
     """
     out_dir = run_dir / "samples"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -268,8 +268,18 @@ def qualitative_check(
         ("hair_only", text_emb_empty, id_tokens,                   hair_tokens,                   3.0),
         ("both_off",  text_emb_empty, id_tokens,                   torch.zeros_like(hair_tokens), 3.0),
     ]
+    cross_src_idx0 = None
+    src_img_b = None
     if B >= 2:
-        hair_tokens_cross = hair_tokens.roll(shifts=1, dims=0)  # hair source != id source
+        # pick most dissimilar hair token in batch for each sample
+        flat = hair_tokens.detach().float().reshape(B, -1)
+        flat = flat / (flat.norm(dim=-1, keepdim=True) + 1e-8)
+        sim = flat @ flat.t()
+        sim.fill_diagonal_(2.0)
+        src_idx = sim.argmin(dim=1)
+        hair_tokens_cross = hair_tokens[src_idx]
+        cross_src_idx0 = int(src_idx[0].item())
+        src_img_b = (pixel_values[cross_src_idx0:cross_src_idx0 + 1].float() * 0.5 + 0.5).clamp(0, 1)
         variants.append(("cross_hair", text_emb, id_tokens, hair_tokens_cross, 3.0))
 
     rows = []
@@ -301,10 +311,13 @@ def qualitative_check(
         print(f"[qual diff] hair_only vs both_off: l2={l2_hb:.6f}, cos={cos_hb:.6f}")
     if "cross_hair" in row_by_tag and "both_on" in row_by_tag:
         l2_ch, cos_ch = _img_pair_metrics(row_by_tag["cross_hair"], row_by_tag["both_on"])
-        print(f"[qual diff] cross_hair vs both_on: l2={l2_ch:.6f}, cos={cos_ch:.6f}")
+        print(f"[qual diff] cross_hair vs both_on: l2={l2_ch:.6f}, cos={cos_ch:.6f} src_idx0={cross_src_idx0}")
 
     orig_01 = (pixel_values[:1].float() * 0.5 + 0.5).clamp(0, 1)
-    row = torch.cat([orig_01] + rows, dim=0)
+    row_items = [orig_01] + rows
+    if src_img_b is not None:
+        row_items.append(src_img_b)
+    row = torch.cat(row_items, dim=0)
 
     path = out_dir / f"step_{step:07d}.png"
     _save_row(row, str(path))
@@ -477,7 +490,10 @@ def main(cfg_path: str):
     opt = torch.optim.AdamW(
         [
             {"params": list(hair_cond.proj.parameters()), "lr": float(cfg["train"]["lr"])},
-            {"params": dual_params, "lr": float(cfg["train"]["lr"])},
+            {
+                "params": dual_params,
+                "lr": float(cfg["train"]["lr"]) * float(cfg["train"].get("dual_lr_mult", 1.0)),
+            },
         ],
         weight_decay=float(cfg["train"]["weight_decay"]),
     )
@@ -488,6 +504,13 @@ def main(cfg_path: str):
     print("trainable id_cond:", count_trainable(id_cond))            # 0
     print("trainable hair_cond:", count_trainable(hair_cond))
     print("trainable hair_proj:", count_trainable(hair_cond.proj))   # > 0
+    print(
+        "lr hair_proj=", float(cfg["train"]["lr"]),
+        "lr dual=",
+        float(cfg["train"]["lr"]) * float(cfg["train"].get("dual_lr_mult", 1.0)),
+        "hair_aux_weight=",
+        float(cfg["train"].get("hair_aux_weight", 0.0)),
+    )
 
     scaler = torch.amp.GradScaler("cuda", enabled=True)
 
@@ -557,6 +580,7 @@ def main(cfg_path: str):
         with torch.no_grad():
             face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_images, return_mask=True)  # (B,512), (B,)
             text_emb = project_face_embs(pipe, face_embs_512).to(dtype_unet)  # (B,T,H)
+            text_emb_empty = project_face_embs(pipe, torch.zeros_like(face_embs_512)).to(dtype_unet)
 
             if text_emb.shape[0] != B:
                 if text_emb.shape[0] == 1:
@@ -594,13 +618,22 @@ def main(cfg_path: str):
         
         # Сборка conditioning
         enc = {"text": text_emb, "id": id_tokens, "hair": hair_tokens}
+        enc_hair_only = {"text": text_emb_empty, "id": id_tokens, "hair": hair_tokens}
+        hair_aux_weight = float(cfg["train"].get("hair_aux_weight", 0.0))
 
         # Train step (predict noise)
         opt.zero_grad(set_to_none=True)
 
         with torch.amp.autocast("cuda", dtype=torch.float16):
             noise_pred = pipe.unet(noisy, t, encoder_hidden_states=enc).sample
-            loss = F.mse_loss(noise_pred.float(), noise.float())
+            loss_main = F.mse_loss(noise_pred.float(), noise.float())
+            loss = loss_main
+            if hair_aux_weight > 0.0:
+                noise_pred_h = pipe.unet(noisy, t, encoder_hidden_states=enc_hair_only).sample
+                loss_hair = F.mse_loss(noise_pred_h.float(), noise.float())
+                loss = loss + hair_aux_weight * loss_hair
+            else:
+                loss_hair = torch.zeros((), device=device, dtype=loss_main.dtype)
 
         if not torch.isfinite(loss):
             print(f"[step {step}] loss non-finite -> skipping")
@@ -613,7 +646,10 @@ def main(cfg_path: str):
         scaler.update()
 
         if step % log_every == 0:
-            print(f"[step {step}/{max_steps}] loss={loss.item():.6f}")
+            print(
+                f"[step {step}/{max_steps}] loss={loss.item():.6f} "
+                f"(main={loss_main.item():.6f}, hair_aux={loss_hair.item():.6f})"
+            )
 
         # Qualitative sampling
         if cfg.get("eval", {}).get("enabled", False):
