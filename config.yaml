@@ -25,7 +25,7 @@ models:
 cond:
   n_tokens: 4
   scale_id: 0.0
-  scale_hair: 0.05
+  scale_hair: 1.0
   hair_bg_value: 0.0
   hair_class: 13
 

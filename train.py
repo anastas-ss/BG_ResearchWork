@@ -435,7 +435,7 @@ def main(cfg_path: str):
     opt = torch.optim.AdamW(
         [
             {"params": list(hair_cond.proj.parameters()), "lr": float(cfg["train"]["lr"])},
-            {"params": dual_params, "lr": float(cfg["train"]["lr"]) * 0.05},
+            {"params": dual_params, "lr": float(cfg["train"]["lr"])},
         ],
         weight_decay=float(cfg["train"]["weight_decay"]),
     )
