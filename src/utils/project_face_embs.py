@@ -46,6 +46,7 @@ def project_face_embs(pipeline, face_embs):
                 face_embs_padded = F.pad(face_embs.to(device), (0, hidden_size - 512), "constant", 0)
             else:
                 face_embs_padded = face_embs.to(device)[:, :hidden_size]
+            face_embs_padded = face_embs_padded.to(dtype=token_embs.dtype)
 
             token_embs[id_mask] = face_embs_padded
             prompt_embeds = text_encoder(
@@ -66,6 +67,7 @@ def project_face_embs(pipeline, face_embs):
         face_embs_padded = F.pad(face_embs.to(device), (0, hidden_size - 512), "constant", 0)
     else:
         face_embs_padded = face_embs.to(device)[:, :hidden_size]
+    face_embs_padded = face_embs_padded.to(dtype=token_embs.dtype)
 
     token_embs[id_mask] = face_embs_padded
     return token_embs  # [N, T, H]

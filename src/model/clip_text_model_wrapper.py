@@ -1,10 +1,6 @@
 import torch
 from transformers import CLIPTextModel
 from transformers.modeling_outputs import BaseModelOutputWithPooling
-from transformers.modeling_attn_mask_utils import (
-    _create_4d_causal_attention_mask,
-    _prepare_4d_attention_mask,
-)
 
 
 class CLIPTextModelWrapper(CLIPTextModel):
@@ -55,11 +51,20 @@ class CLIPTextModelWrapper(CLIPTextModel):
             inputs_embeds=input_token_embs,
         )
 
-        causal_attention_mask = _create_4d_causal_attention_mask(
-            input_shape, hidden_states.dtype, device=hidden_states.device
+        bsz, seq_len = input_shape
+        # Build CLIP causal mask: block attention to future tokens.
+        min_val = torch.finfo(hidden_states.dtype).min
+        causal_attention_mask = torch.full(
+            (bsz, 1, seq_len, seq_len),
+            fill_value=min_val,
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
         )
+        causal_attention_mask = torch.triu(causal_attention_mask, diagonal=1)
         if attention_mask is not None:
-            attention_mask = _prepare_4d_attention_mask(attention_mask, hidden_states.dtype)
+            # Convert [B,S] with 1=keep,0=mask to additive [B,1,1,S] mask.
+            attention_mask = attention_mask[:, None, None, :].to(dtype=hidden_states.dtype)
+            attention_mask = (1.0 - attention_mask) * min_val
 
         encoder_outputs = self.text_model.encoder(
             inputs_embeds=hidden_states,
