@@ -43,7 +43,7 @@ def project_face_embs(pipeline, face_embs):
     # Replace "id" token embedding
     token_embs[:, id_pos, :] = face_embs_padded
     outputs = text_encoder(
-        input_ids=None,
+        input_ids=input_ids_b,
         attention_mask=attention_mask_b,
         inputs_embeds=token_embs,
         return_dict=True,
