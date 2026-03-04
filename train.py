@@ -199,7 +199,7 @@ def qualitative_check(
 ):
     """
     Saves: runs/<exp>/samples/step_XXXXXXX.png
-    Row: [orig | both_on | id_only | hair_only | both_off | cross_hair(optional) | hair_source_B(optional)]
+    Row: [orig | both_on | id_only | hair_only | both_off | cross_hair(optional) | hair_source_B(optional) | hair_source_B_masked(optional)]
     """
     out_dir = run_dir / "samples"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -270,6 +270,7 @@ def qualitative_check(
     ]
     cross_src_idx0 = None
     src_img_b = None
+    src_img_b_masked = None
     if B >= 2:
         # pick most dissimilar hair token in batch for each sample
         flat = hair_tokens.detach().float().reshape(B, -1)
@@ -280,6 +281,9 @@ def qualitative_check(
         hair_tokens_cross = hair_tokens[src_idx]
         cross_src_idx0 = int(src_idx[0].item())
         src_img_b = (pixel_values[cross_src_idx0:cross_src_idx0 + 1].float() * 0.5 + 0.5).clamp(0, 1)
+        pil_b = pil_images[cross_src_idx0].convert("RGB").resize((W, H))
+        pil_b_masked = apply_mask_to_pil(pil_b, hair_masks[cross_src_idx0], bg=hair_cond.bg_value)
+        src_img_b_masked = TVF.to_tensor(pil_b_masked).unsqueeze(0)
         variants.append(("cross_hair", text_emb, id_tokens, hair_tokens_cross, 3.0))
 
     rows = []
@@ -317,6 +321,8 @@ def qualitative_check(
     row_items = [orig_01] + rows
     if src_img_b is not None:
         row_items.append(src_img_b)
+    if src_img_b_masked is not None:
+        row_items.append(src_img_b_masked.to(dtype=orig_01.dtype, device=orig_01.device))
     row = torch.cat(row_items, dim=0)
 
     path = out_dir / f"step_{step:07d}.png"
