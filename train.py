@@ -36,7 +36,7 @@ from src.data.images import ImageFolderDataset
 from src.model.dual_ip_attention import DualImageAttnProcessor
 from src.model.clip_text_model_wrapper import CLIPTextModelWrapper
 from src.model.id_conditioner_insightface import IDArcFaceConditioner
-from src.model.hair_conditioner_parsing import HairConditioner, remove_hair_from_pil
+from src.model.hair_conditioner_parsing import HairConditioner
 from src.utils.project_face_embs import project_face_embs
 
 
@@ -164,10 +164,6 @@ def qualitative_check(
     B, _, H, W = pixel_values.shape
     vae_sf = pipe.vae_scale_factor if hasattr(pipe, "vae_scale_factor") else 8
 
-    # remove hair from ID shortcut in eval too
-    hair_masks = hair_cond.get_hair_masks(pil_images)
-    pil_id = [remove_hair_from_pil(im, hair_masks[i], fill=0.5) for i, im in enumerate(pil_images)]
-
     face_mask = torch.ones(len(pil_images), device=pixel_values.device, dtype=torch.bool)
 
     hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
@@ -175,7 +171,7 @@ def qualitative_check(
 
     # ID goes only through Arc2Face text stream in this setup.
     with torch.no_grad():
-        _, face_mask = id_cond.extract_arcface_embs(pil_id, return_mask=True)
+        _, face_mask = id_cond.extract_arcface_embs(pil_images, return_mask=True)
     id_tokens = torch.zeros_like(hair_tokens)
     
     print("has_face:", face_mask.tolist())
@@ -220,10 +216,10 @@ def qualitative_check(
         text_emb_plain = pipe.text_encoder(**tok_plain).last_hidden_state.to(dtype_unet)
 
     variants = [
-        ("both_on",   text_emb,       id_tokens,                   hair_tokens,                   7.0),
-        ("id_only",   text_emb,       id_tokens,                   torch.zeros_like(hair_tokens), 7.0),
-        ("hair_only", text_emb_plain, id_tokens,                   hair_tokens,                   7.0),
-        ("both_off",  text_emb_plain, id_tokens,                   torch.zeros_like(hair_tokens), 7.0),
+        ("both_on",   text_emb,       id_tokens,                   hair_tokens,                   3.0),
+        ("id_only",   text_emb,       id_tokens,                   torch.zeros_like(hair_tokens), 3.0),
+        ("hair_only", text_emb_plain, id_tokens,                   hair_tokens,                   3.0),
+        ("both_off",  text_emb_plain, id_tokens,                   torch.zeros_like(hair_tokens), 3.0),
     ]
 
     rows = []
@@ -493,14 +489,9 @@ def main(cfg_path: str):
         pil_images = batch["pil"]  # list[PIL]
         B = pixel_values.shape[0]
 
-        # Build hair-less images for ID branch
-        with torch.no_grad():
-            hair_masks = hair_cond.get_hair_masks(pil_images)
-            pil_id = [remove_hair_from_pil(im, hair_masks[i], fill=0.5) for i, im in enumerate(pil_images)]
-
         # ---- Arc2Face text embedding ----
         with torch.no_grad():
-            face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_id, return_mask=True)  # (B,512), (B,)
+            face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_images, return_mask=True)  # (B,512), (B,)
             text_emb = project_face_embs(pipe, face_embs_512).to(dtype_unet)  # (B,T,H)
 
             if text_emb.shape[0] != B:
@@ -570,10 +561,7 @@ def main(cfg_path: str):
                 qB = q_pixel.shape[0]
 
                 with torch.no_grad():
-                    q_hair_masks = hair_cond.get_hair_masks(q_pil)
-                    q_pil_id = [remove_hair_from_pil(im, q_hair_masks[i], fill=0.5) for i, im in enumerate(q_pil)]
-
-                    q_face_embs_512, q_face_mask = id_cond.extract_arcface_embs(q_pil_id, return_mask=True)
+                    q_face_embs_512, q_face_mask = id_cond.extract_arcface_embs(q_pil, return_mask=True)
                     q_text_emb = project_face_embs(pipe, q_face_embs_512).to(dtype_unet)
 
                     if q_text_emb.shape[0] != qB:

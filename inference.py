@@ -11,7 +11,7 @@ from diffusers import StableDiffusionPipeline, DPMSolverMultistepScheduler, UNet
 from src.model.clip_text_model_wrapper import CLIPTextModelWrapper
 from src.model.dual_ip_attention import DualImageAttnProcessor
 from src.model.id_conditioner_insightface import IDArcFaceConditioner
-from src.model.hair_conditioner_parsing import HairConditioner, remove_hair_from_pil
+from src.model.hair_conditioner_parsing import HairConditioner
 from src.utils.project_face_embs import project_face_embs
 
 
@@ -105,10 +105,7 @@ def generate_one(
     device = pipe.device
     dtype_unet = next(pipe.unet.parameters()).dtype
 
-    hair_mask = hair_cond.get_hair_masks([pil_id])[0]
-    pil_id_no_hair = remove_hair_from_pil(pil_id, hair_mask, fill=0.5)
-
-    face_embs_512, _ = id_cond.extract_arcface_embs([pil_id_no_hair], return_mask=True)
+    face_embs_512, _ = id_cond.extract_arcface_embs([pil_id], return_mask=True)
     text_emb = project_face_embs(pipe, face_embs_512).to(dtype_unet)
     text_emb_uc = get_text_emb(pipe, "", device, dtype_unet)
 
