@@ -168,7 +168,7 @@ def qualitative_check(
 ):
     """
     Saves: runs/<exp>/samples/step_XXXXXXX.png
-    Row: [orig | both_on | id_only | hair_only | both_off]
+    Row: [orig | both_on | id_only | hair_only | both_off | cross_hair(optional)]
     """
     out_dir = run_dir / "samples"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -182,8 +182,10 @@ def qualitative_check(
     hair_tokens = hair_tokens / (hair_tokens.norm(dim=-1, keepdim=True) + 1e-6)
 
     # ID goes only through Arc2Face text stream in this setup.
+    # For "id=0" ablations we feed an explicit empty Arc2Face embedding, not plain text.
     with torch.no_grad():
-        _, face_mask = id_cond.extract_arcface_embs(pil_images, return_mask=True)
+        face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_images, return_mask=True)
+        text_emb_empty = project_face_embs(pipe, torch.zeros_like(face_embs_512)).to(dtype_unet)
     id_tokens = torch.zeros_like(hair_tokens)
     
     print("has_face:", face_mask.tolist())
@@ -219,20 +221,16 @@ def qualitative_check(
 
     with torch.no_grad():
         text_emb_uc = pipe.text_encoder(**tok_uc).last_hidden_state.to(dtype_unet)
-        tok_plain = pipe.tokenizer(
-            ["a portrait photo of a person"] * B,
-            padding="max_length",
-            max_length=pipe.tokenizer.model_max_length,
-            return_tensors="pt",
-        ).to(pixel_values.device)
-        text_emb_plain = pipe.text_encoder(**tok_plain).last_hidden_state.to(dtype_unet)
 
     variants = [
         ("both_on",   text_emb,       id_tokens,                   hair_tokens,                   3.0),
         ("id_only",   text_emb,       id_tokens,                   torch.zeros_like(hair_tokens), 3.0),
-        ("hair_only", text_emb_plain, id_tokens,                   hair_tokens,                   3.0),
-        ("both_off",  text_emb_plain, id_tokens,                   torch.zeros_like(hair_tokens), 3.0),
+        ("hair_only", text_emb_empty, id_tokens,                   hair_tokens,                   3.0),
+        ("both_off",  text_emb_empty, id_tokens,                   torch.zeros_like(hair_tokens), 3.0),
     ]
+    if B >= 2:
+        hair_tokens_cross = hair_tokens.roll(shifts=1, dims=0)  # hair source != id source
+        variants.append(("cross_hair", text_emb, id_tokens, hair_tokens_cross, 3.0))
 
     rows = []
     row_by_tag = {}
@@ -261,6 +259,9 @@ def qualitative_check(
     if "hair_only" in row_by_tag and "both_off" in row_by_tag:
         l2_hb, cos_hb = _img_pair_metrics(row_by_tag["hair_only"], row_by_tag["both_off"])
         print(f"[qual diff] hair_only vs both_off: l2={l2_hb:.6f}, cos={cos_hb:.6f}")
+    if "cross_hair" in row_by_tag and "both_on" in row_by_tag:
+        l2_ch, cos_ch = _img_pair_metrics(row_by_tag["cross_hair"], row_by_tag["both_on"])
+        print(f"[qual diff] cross_hair vs both_on: l2={l2_ch:.6f}, cos={cos_ch:.6f}")
 
     orig_01 = (pixel_values[:1].float() * 0.5 + 0.5).clamp(0, 1)
     row = torch.cat([orig_01] + rows, dim=0)
