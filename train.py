@@ -170,24 +170,12 @@ def qualitative_check(
     face_mask = torch.ones(len(pil_images), device=pixel_values.device, dtype=torch.bool)
 
     hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
-    
-   # ---- ArcFace ID tokens (frozen) ----
+    hair_tokens = hair_tokens / (hair_tokens.norm(dim=-1, keepdim=True) + 1e-6)
+
+    # ID goes only through Arc2Face text stream in this setup.
     with torch.no_grad():
-        # Получаем ArcFace embedding [B,512]
-        face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_id, return_mask=True)  # (B,512), (B,)
-        id_tokens = id_cond.embs_to_tokens(face_embs_512, out_dtype=dtype_unet)
-    
-        # fallback для изображений без лица
-        if (~face_mask).any():
-            prompt_fb = "a portrait photo of a person"
-            tok_fb = pipe.tokenizer(
-                [prompt_fb] * len(pil_images),
-                padding="max_length",
-                max_length=pipe.tokenizer.model_max_length,
-                return_tensors="pt",
-            ).to(pixel_values.device)
-            text_fb = pipe.text_encoder(**tok_fb).last_hidden_state.to(dtype_unet)
-            id_tokens[~face_mask] = 0.0  # оставляем ID-токены нулями для отсутствующих лиц
+        _, face_mask = id_cond.extract_arcface_embs(pil_id, return_mask=True)
+    id_tokens = torch.zeros_like(hair_tokens)
     
     print("has_face:", face_mask.tolist())
 
@@ -233,8 +221,8 @@ def qualitative_check(
     variants = [
         ("both_on",   text_emb,       id_tokens,                   hair_tokens,                   7.0),
         ("id_only",   text_emb,       id_tokens,                   torch.zeros_like(hair_tokens), 7.0),
-        ("hair_only", text_emb,       torch.zeros_like(id_tokens), hair_tokens,                   7.0),
-        ("both_off",  text_emb_plain, torch.zeros_like(id_tokens), torch.zeros_like(hair_tokens), 7.0),
+        ("hair_only", text_emb_plain, id_tokens,                   hair_tokens,                   7.0),
+        ("both_off",  text_emb_plain, id_tokens,                   torch.zeros_like(hair_tokens), 7.0),
     ]
 
     rows = []
@@ -523,32 +511,10 @@ def main(cfg_path: str):
         t = torch.randint(0, scheduler.config.num_train_timesteps, (B,), device=device).long()
         noisy = scheduler.add_noise(latents, noise, t).to(dtype=dtype_unet)
 
-        # Conditioning tokens (from PIL)
-        # ---- ArcFace ID tokens (frozen) ----
-        with torch.no_grad():
-            # Получаем ArcFace embedding [B,512]
-            face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_id, return_mask=True)  # (B,512), (B,)
-            
-            # Детерминированный frozen mapping ArcFace -> cross-attention tokens
-            id_tokens = id_cond.embs_to_tokens(face_embs_512, out_dtype=dtype_unet)
-        
-            # fallback для изображений без лица
-            if (~face_mask).any():
-                # обычный текст prompt для отсутствующих лиц
-                prompt_fb = cfg.get("train", {}).get("prompt", "a portrait photo of a person")
-                tok_fb = pipe.tokenizer(
-                    [prompt_fb] * B,
-                    padding="max_length",
-                    max_length=pipe.tokenizer.model_max_length,
-                    return_tensors="pt",
-                ).to(device)
-                text_fb = pipe.text_encoder(**tok_fb).last_hidden_state.to(dtype_unet)
-                # Здесь мы просто оставляем id_tokens для этих позиций как нули
-                id_tokens[~face_mask] = 0.0
-        
         # Hair tokens
         hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)  # [B, n_tokens, cross_dim]
         hair_tokens = hair_tokens / (hair_tokens.norm(dim=-1, keepdim=True) + 1e-6)
+        id_tokens = torch.zeros_like(hair_tokens)
         
         # Сборка conditioning
         enc = {"text": text_emb, "id": id_tokens, "hair": hair_tokens}

@@ -111,9 +111,9 @@ def generate_one(
     text_emb = project_face_embs(pipe, face_embs_512).to(dtype_unet)
     text_emb_uc = get_text_emb(pipe, "", device, dtype_unet)
 
-    id_tokens = id_cond.embs_to_tokens(face_embs_512, out_dtype=dtype_unet)
     hair_tokens = hair_cond([pil_hair], out_dtype=dtype_unet)
     hair_tokens = hair_tokens / (hair_tokens.norm(dim=-1, keepdim=True) + 1e-6)
+    id_tokens = torch.zeros_like(hair_tokens)
 
     enc_cond = {"text": text_emb, "id": id_tokens, "hair": hair_tokens}
     enc_uncond = {"text": text_emb_uc, "id": torch.zeros_like(id_tokens), "hair": torch.zeros_like(hair_tokens)}
@@ -156,7 +156,7 @@ def main():
     ap.add_argument("--guidance", type=float, default=7.0)
     ap.add_argument("--seed", type=int, default=123)
 
-    ap.add_argument("--scale_id", type=float, default=1.0)
+    ap.add_argument("--scale_id", type=float, default=0.0)
     ap.add_argument("--scale_hair", type=float, default=1.0)
     ap.add_argument("--hair_class", type=int, default=17)
 
