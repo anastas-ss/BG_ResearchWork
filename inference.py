@@ -10,7 +10,8 @@ from diffusers import StableDiffusionPipeline, DPMSolverMultistepScheduler
 
 from src.model.dual_ip_attention import DualImageAttnProcessor
 from src.model.id_conditioner_insightface import IDArcFaceConditioner
-from src.model.hair_conditioner_parsing import HairConditioner
+from src.model.hair_conditioner_parsing import HairConditioner, remove_hair_from_pil
+from src.utils.project_face_embs import project_face_embs
 
 
 @torch.no_grad()
@@ -36,7 +37,7 @@ def inject_dual_attn(pipe, scale_id: float, scale_hair: float, attn_fp32: bool =
                 m = getattr(m, key)
             hidden_size = m.to_q.in_features
 
-            attn_procs[name] = DualImageAttnProcessor(
+            proc = DualImageAttnProcessor(
                 base_processor=base_proc,
                 hidden_size=hidden_size,
                 cross_attention_dim=cross_dim,
@@ -44,6 +45,12 @@ def inject_dual_attn(pipe, scale_id: float, scale_hair: float, attn_fp32: bool =
                 scale_hair=float(scale_hair),
                 attn_fp32=attn_fp32,
             ).to(device=pipe.device, dtype=torch.float32)
+
+            with torch.no_grad():
+                proc.to_k_id.weight.copy_(m.to_k.weight.detach().to(proc.to_k_id.weight.dtype))
+                proc.to_v_id.weight.copy_(m.to_v.weight.detach().to(proc.to_v_id.weight.dtype))
+
+            attn_procs[name] = proc
             n_cross += 1
         else:
             attn_procs[name] = base_proc
@@ -97,11 +104,16 @@ def generate_one(
     device = pipe.device
     dtype_unet = next(pipe.unet.parameters()).dtype
 
-    text_emb = get_text_emb(pipe, prompt, device, dtype_unet)
+    hair_mask = hair_cond.get_hair_masks([pil_id])[0]
+    pil_id_no_hair = remove_hair_from_pil(pil_id, hair_mask, fill=0.5)
+
+    face_embs_512, _ = id_cond.extract_arcface_embs([pil_id_no_hair], return_mask=True)
+    text_emb = project_face_embs(pipe, face_embs_512).to(dtype_unet)
     text_emb_uc = get_text_emb(pipe, "", device, dtype_unet)
 
-    id_tokens = id_cond([pil_id], out_dtype=dtype_unet)
+    id_tokens = id_cond.embs_to_tokens(face_embs_512, out_dtype=dtype_unet)
     hair_tokens = hair_cond([pil_hair], out_dtype=dtype_unet)
+    hair_tokens = hair_tokens / (hair_tokens.norm(dim=-1, keepdim=True) + 1e-6)
 
     enc_cond = {"text": text_emb, "id": id_tokens, "hair": hair_tokens}
     enc_uncond = {"text": text_emb_uc, "id": torch.zeros_like(id_tokens), "hair": torch.zeros_like(hair_tokens)}
@@ -146,6 +158,7 @@ def main():
 
     ap.add_argument("--scale_id", type=float, default=1.0)
     ap.add_argument("--scale_hair", type=float, default=1.0)
+    ap.add_argument("--hair_class", type=int, default=17)
 
     ap.add_argument("--n_tokens", type=int, default=4)
     ap.add_argument("--max_items", type=int, default=0, help="0 = all")
@@ -184,6 +197,7 @@ def main():
         n_tokens=args.n_tokens,
         cross_dim=cross_dim,
         hair_weights_path=args.hair_weights,
+        hair_class=args.hair_class,
         device=device,
         clip_dtype=torch.float16,
         proj_dtype=torch.float32,

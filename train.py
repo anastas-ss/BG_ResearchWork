@@ -60,11 +60,11 @@ def sanity_check_tokens(pipe, id_cond, hair_cond, dl, dtype_unet, n_samples=4):
 
     # ID tokens
     face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_images, return_mask=True)
-    id_tokens = id_cond.proj(face_embs_512.float())
-    id_tokens = id_tokens.view(B, id_cond.n_tokens, pipe.unet.config.cross_attention_dim)
+    id_tokens = id_cond.embs_to_tokens(face_embs_512, out_dtype=dtype_unet)
 
     # Hair tokens
     hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
+    hair_tokens = hair_tokens / (hair_tokens.norm(dim=-1, keepdim=True) + 1e-6)
 
     print("\n=== Sanity Check Tokens ===")
     print(f"face_mask: {face_mask.tolist()}")
@@ -174,11 +174,8 @@ def qualitative_check(
    # ---- ArcFace ID tokens (frozen) ----
     with torch.no_grad():
         # Получаем ArcFace embedding [B,512]
-        face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_images, return_mask=True)  # (B,512), (B,)
-        
-        # Проецируем в cross-attention токены [B, n_tokens, cross_dim]
-        id_tokens = id_cond.proj(face_embs_512.float())  # всегда float32 для замороженного ID # [B, n_tokens*cross_dim]
-        id_tokens = id_tokens.view(len(pil_images), id_cond.n_tokens, hair_tokens.shape[-1])  # [B, n_tokens, cross_dim]
+        face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_id, return_mask=True)  # (B,512), (B,)
+        id_tokens = id_cond.embs_to_tokens(face_embs_512, out_dtype=dtype_unet)
     
         # fallback для изображений без лица
         if (~face_mask).any():
@@ -188,7 +185,7 @@ def qualitative_check(
                 padding="max_length",
                 max_length=pipe.tokenizer.model_max_length,
                 return_tensors="pt",
-            ).to(pil_images[0].device)
+            ).to(pixel_values.device)
             text_fb = pipe.text_encoder(**tok_fb).last_hidden_state.to(dtype_unet)
             id_tokens[~face_mask] = 0.0  # оставляем ID-токены нулями для отсутствующих лиц
     
@@ -225,17 +222,24 @@ def qualitative_check(
 
     with torch.no_grad():
         text_emb_uc = pipe.text_encoder(**tok_uc).last_hidden_state.to(dtype_unet)
+        tok_plain = pipe.tokenizer(
+            ["a portrait photo of a person"] * B,
+            padding="max_length",
+            max_length=pipe.tokenizer.model_max_length,
+            return_tensors="pt",
+        ).to(pixel_values.device)
+        text_emb_plain = pipe.text_encoder(**tok_plain).last_hidden_state.to(dtype_unet)
 
     variants = [
-        ("both_on",   id_tokens,                   hair_tokens,                   7.0),
-        ("id_only",   id_tokens,                   torch.zeros_like(hair_tokens), 7.0),
-        ("hair_only", torch.zeros_like(id_tokens), hair_tokens,                   7.0),
-        ("both_off",  torch.zeros_like(id_tokens), torch.zeros_like(hair_tokens), 7.0),
+        ("both_on",   text_emb,       id_tokens,                   hair_tokens,                   7.0),
+        ("id_only",   text_emb,       id_tokens,                   torch.zeros_like(hair_tokens), 7.0),
+        ("hair_only", text_emb,       torch.zeros_like(id_tokens), hair_tokens,                   7.0),
+        ("both_off",  text_emb_plain, torch.zeros_like(id_tokens), torch.zeros_like(hair_tokens), 7.0),
     ]
 
     rows = []
-    for tag, id_t, hair_t, cfg_s in variants:
-        enc_cond   = {"text": text_emb,    "id": id_t, "hair": hair_t}
+    for tag, txt_t, id_t, hair_t, cfg_s in variants:
+        enc_cond   = {"text": txt_t, "id": id_t, "hair": hair_t}
         enc_uncond = {"text": text_emb_uc, "id": torch.zeros_like(id_t), "hair": torch.zeros_like(hair_t)}
 
         lat = sample_with_cfg(
@@ -313,7 +317,7 @@ def main(cfg_path: str):
                 m = getattr(m, key)
             hidden_size = m.to_q.in_features
 
-            attn_procs[name] = DualImageAttnProcessor(
+            proc = DualImageAttnProcessor(
                 base_processor=base_proc,
                 hidden_size=hidden_size,
                 cross_attention_dim=cross_dim,
@@ -321,6 +325,13 @@ def main(cfg_path: str):
                 scale_hair=float(cfg["cond"]["scale_hair"]),
                 attn_fp32=True,
             ).to(device=device, dtype=torch.float32)  # keep this module stable in fp32
+
+            # Frozen ID branch should start from meaningful SD projections, not zeros.
+            with torch.no_grad():
+                proc.to_k_id.weight.copy_(m.to_k.weight.detach().to(proc.to_k_id.weight.dtype))
+                proc.to_v_id.weight.copy_(m.to_v.weight.detach().to(proc.to_v_id.weight.dtype))
+
+            attn_procs[name] = proc
             n_cross += 1
         else:
             attn_procs[name] = base_proc
@@ -351,6 +362,7 @@ def main(cfg_path: str):
         n_tokens=n_tokens,
         cross_dim=cross_dim,
         hair_weights_path=hair_w,
+        hair_class=int(cfg["cond"].get("hair_class", 17)),
         device=device,
         clip_dtype=torch.float16,
         proj_dtype=torch.float32,
@@ -408,7 +420,7 @@ def main(cfg_path: str):
     print("trainable hair_cond:", count_trainable(hair_cond))
     print("trainable hair_proj:", count_trainable(hair_cond.proj))   # > 0
 
-    scaler = torch.cuda.amp.GradScaler(enabled=True)
+    scaler = torch.amp.GradScaler("cuda", enabled=True)
 
     fixed_batch = None
     if cfg.get("eval", {}).get("enabled", False):
@@ -517,9 +529,8 @@ def main(cfg_path: str):
             # Получаем ArcFace embedding [B,512]
             face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_id, return_mask=True)  # (B,512), (B,)
             
-            # Проецируем в cross-attention токены [B, n_tokens, cross_dim]
-            id_tokens = id_cond.proj(face_embs_512.float())  # всегда float32 для замороженного ID # [B, n_tokens*cross_dim]
-            id_tokens = id_tokens.view(B, id_cond.n_tokens, cross_dim)  # [B, n_tokens, cross_dim]
+            # Детерминированный frozen mapping ArcFace -> cross-attention tokens
+            id_tokens = id_cond.embs_to_tokens(face_embs_512, out_dtype=dtype_unet)
         
             # fallback для изображений без лица
             if (~face_mask).any():
@@ -537,6 +548,7 @@ def main(cfg_path: str):
         
         # Hair tokens
         hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)  # [B, n_tokens, cross_dim]
+        hair_tokens = hair_tokens / (hair_tokens.norm(dim=-1, keepdim=True) + 1e-6)
         
         # Сборка conditioning
         enc = {"text": text_emb, "id": id_tokens, "hair": hair_tokens}
@@ -544,7 +556,7 @@ def main(cfg_path: str):
         # Train step (predict noise)
         opt.zero_grad(set_to_none=True)
 
-        with torch.cuda.amp.autocast(dtype=torch.float16):
+        with torch.amp.autocast("cuda", dtype=torch.float16):
             noise_pred = pipe.unet(noisy, t, encoder_hidden_states=enc).sample
             loss = F.mse_loss(noise_pred.float(), noise.float())
 
