@@ -104,6 +104,18 @@ def _save_row(images_01: torch.Tensor, path: str):
     grid = torchvision.utils.make_grid(images_01, nrow=images_01.shape[0])
     torchvision.utils.save_image(grid, path)
 
+@torch.no_grad()
+def _img_pair_metrics(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-8):
+    """
+    a,b: [1,3,H,W] in [0,1]
+    returns: (l2_per_pixel, cosine_similarity)
+    """
+    av = a.float().reshape(a.shape[0], -1)
+    bv = b.float().reshape(b.shape[0], -1)
+    l2 = torch.sqrt(((av - bv) ** 2).mean(dim=1)).mean().item()
+    cos = F.cosine_similarity(av, bv, dim=1, eps=eps).mean().item()
+    return l2, cos
+
 
 @torch.no_grad()
 def sample_with_cfg(
@@ -223,6 +235,7 @@ def qualitative_check(
     ]
 
     rows = []
+    row_by_tag = {}
     for tag, txt_t, id_t, hair_t, cfg_s in variants:
         enc_cond   = {"text": txt_t, "id": id_t, "hair": hair_t}
         enc_uncond = {"text": text_emb_uc, "id": torch.zeros_like(id_t), "hair": torch.zeros_like(hair_t)}
@@ -239,6 +252,15 @@ def qualitative_check(
 
         img_01 = _vae_decode_to_01(pipe, lat, dtype_unet)  # [B,3,H,W]
         rows.append(img_01[:1])
+        row_by_tag[tag] = img_01[:1]
+
+    # Numeric diagnostics: if these stay ~0 over training, branch effect is weak.
+    if "both_on" in row_by_tag and "id_only" in row_by_tag:
+        l2_bi, cos_bi = _img_pair_metrics(row_by_tag["both_on"], row_by_tag["id_only"])
+        print(f"[qual diff] both_on vs id_only: l2={l2_bi:.6f}, cos={cos_bi:.6f}")
+    if "hair_only" in row_by_tag and "both_off" in row_by_tag:
+        l2_hb, cos_hb = _img_pair_metrics(row_by_tag["hair_only"], row_by_tag["both_off"])
+        print(f"[qual diff] hair_only vs both_off: l2={l2_hb:.6f}, cos={cos_hb:.6f}")
 
     orig_01 = (pixel_values[:1].float() * 0.5 + 0.5).clamp(0, 1)
     row = torch.cat([orig_01] + rows, dim=0)
