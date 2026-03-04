@@ -28,24 +28,21 @@ def project_face_embs(pipeline, face_embs):
     input_ids_b = input_ids.repeat(N, 1)  # [N, T]
     attention_mask_b = attention_mask.repeat(N, 1)  # [N, T]
 
-    # Build token embeddings and inject face vector BEFORE text transformer.
-    # This matches Arc2Face-style conditioning better than replacing last_hidden_state post-hoc.
-    token_embs = text_encoder.text_model.embeddings.token_embedding(input_ids_b)  # [N, T, H]
+    # Forward text encoder in the most version-compatible way.
+    outputs = text_encoder(input_ids=input_ids_b, attention_mask=attention_mask_b, return_dict=True)
+    token_embs = outputs.last_hidden_state  # [N, T, H]
 
     # Find index of "id" token
     arcface_token_id = tokenizer.encode("id", add_special_tokens=False)[0]
     id_pos = (input_ids[0] == arcface_token_id).nonzero(as_tuple=True)[0].item()
 
-    # Pad face_embs to match hidden size
+    # Match ArcFace size (512) to CLIP hidden size.
     hidden_size = token_embs.shape[-1]
-    face_embs_padded = F.pad(face_embs.to(device), (0, hidden_size - 512), "constant", 0)
+    if hidden_size >= 512:
+        face_embs_padded = F.pad(face_embs.to(device), (0, hidden_size - 512), "constant", 0)
+    else:
+        face_embs_padded = face_embs.to(device)[:, :hidden_size]
 
-    # Replace "id" token embedding
+    # Replace "id" token state with ArcFace embedding proxy.
     token_embs[:, id_pos, :] = face_embs_padded
-    outputs = text_encoder(
-        input_ids=input_ids_b,
-        attention_mask=attention_mask_b,
-        inputs_embeds=token_embs,
-        return_dict=True,
-    )
-    return outputs.last_hidden_state  # [N, T, H]
+    return token_embs  # [N, T, H]
