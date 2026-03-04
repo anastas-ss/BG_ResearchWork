@@ -516,6 +516,10 @@ def main(cfg_path: str):
         float(cfg["train"]["lr"]) * float(cfg["train"].get("dual_lr_mult", 1.0)),
         "hair_aux_weight=",
         float(cfg["train"].get("hair_aux_weight", 0.0)),
+        "cross_hair_clip_weight=",
+        float(cfg["train"].get("cross_hair_clip_weight", 0.0)),
+        "cross_hair_clip_every=",
+        int(cfg["train"].get("cross_hair_clip_every", 1)),
     )
 
     scaler = torch.amp.GradScaler("cuda", enabled=True)
@@ -621,11 +625,31 @@ def main(cfg_path: str):
         hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)  # [B, n_tokens, cross_dim]
         hair_tokens = hair_tokens / (hair_tokens.norm(dim=-1, keepdim=True) + 1e-6)
         id_tokens = torch.zeros_like(hair_tokens)
+        # cross-hair: use the most dissimilar hair source from current batch
+        flat = hair_tokens.detach().float().reshape(B, -1)
+        flat = flat / (flat.norm(dim=-1, keepdim=True) + 1e-8)
+        sim = flat @ flat.t()
+        sim.fill_diagonal_(2.0)
+        src_idx = sim.argmin(dim=1)
+        hair_tokens_cross = hair_tokens[src_idx]
         
         # Сборка conditioning
         enc = {"text": text_emb, "id": id_tokens, "hair": hair_tokens}
         enc_hair_only = {"text": text_emb_empty, "id": id_tokens, "hair": hair_tokens}
+        enc_cross = {"text": text_emb, "id": id_tokens, "hair": hair_tokens_cross}
         hair_aux_weight = float(cfg["train"].get("hair_aux_weight", 0.0))
+        cross_hair_clip_weight = float(cfg["train"].get("cross_hair_clip_weight", 0.0))
+        cross_hair_clip_every = int(cfg["train"].get("cross_hair_clip_every", 1))
+        need_cross_clip = (cross_hair_clip_weight > 0.0) and (step % max(1, cross_hair_clip_every) == 0)
+
+        # reference hair CLIP embeddings from source B (detached target)
+        if need_cross_clip:
+            with torch.no_grad():
+                ref_pooled = hair_cond._pooled_hair(pil_images).detach().float()     # [B, D]
+                ref_pooled = ref_pooled[src_idx]                                      # [B, D]
+                ref_pooled = ref_pooled / (ref_pooled.norm(dim=-1, keepdim=True) + 1e-6)
+                hair_masks = hair_cond.get_hair_masks(pil_images).detach()            # [B,512,512]
+                hair_masks = hair_masks[src_idx].unsqueeze(1).to(device=device, dtype=torch.float32)
 
         # Train step (predict noise)
         opt.zero_grad(set_to_none=True)
@@ -641,6 +665,37 @@ def main(cfg_path: str):
             else:
                 loss_hair = torch.zeros((), device=device, dtype=loss_main.dtype)
 
+            if need_cross_clip:
+                noise_pred_cross = pipe.unet(noisy, t, encoder_hidden_states=enc_cross).sample
+            else:
+                noise_pred_cross = None
+
+        if need_cross_clip:
+            # Predict x0 from eps-prediction and compute CLIP similarity on hair-masked generated image.
+            alpha_t = scheduler.alphas_cumprod.to(device=noisy.device, dtype=torch.float32)[t].view(B, 1, 1, 1)
+            x0_cross = (noisy.float() - (1.0 - alpha_t).sqrt() * noise_pred_cross.float()) / alpha_t.sqrt()
+            x0_cross = x0_cross.to(dtype=dtype_unet)
+            img_cross = pipe.vae.decode(x0_cross / pipe.vae.config.scaling_factor).sample  # [-1,1]
+            img_cross_01 = (img_cross.float() * 0.5 + 0.5).clamp(0, 1)
+
+            if hair_masks.shape[-2:] != img_cross_01.shape[-2:]:
+                hair_masks = F.interpolate(hair_masks, size=img_cross_01.shape[-2:], mode="nearest")
+            bg = float(cfg["cond"].get("hair_bg_value", 0.0))
+            img_cross_masked = img_cross_01 * hair_masks + bg * (1.0 - hair_masks)
+
+            clip_size = int(hair_cond.clip.config.image_size)
+            clip_in = F.interpolate(img_cross_masked, size=(clip_size, clip_size), mode="bicubic", align_corners=False)
+            clip_mean = torch.tensor(hair_cond.proc.image_mean, device=device, dtype=torch.float32).view(1, 3, 1, 1)
+            clip_std = torch.tensor(hair_cond.proc.image_std, device=device, dtype=torch.float32).view(1, 3, 1, 1)
+            clip_in = (clip_in - clip_mean) / clip_std
+
+            pooled_cross = hair_cond.clip(pixel_values=clip_in).pooler_output.float()
+            pooled_cross = pooled_cross / (pooled_cross.norm(dim=-1, keepdim=True) + 1e-6)
+            loss_cross_clip = (1.0 - (pooled_cross * ref_pooled).sum(dim=-1)).mean()
+            loss = loss + cross_hair_clip_weight * loss_cross_clip
+        else:
+            loss_cross_clip = torch.zeros((), device=device, dtype=loss_main.dtype)
+
         if not torch.isfinite(loss):
             print(f"[step {step}] loss non-finite -> skipping")
             continue
@@ -654,7 +709,7 @@ def main(cfg_path: str):
         if step % log_every == 0:
             print(
                 f"[step {step}/{max_steps}] loss={loss.item():.6f} "
-                f"(main={loss_main.item():.6f}, hair_aux={loss_hair.item():.6f})"
+                f"(main={loss_main.item():.6f}, hair_aux={loss_hair.item():.6f}, cross_clip={loss_cross_clip.item():.6f})"
             )
 
         # Qualitative sampling
