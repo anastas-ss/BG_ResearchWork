@@ -27,6 +27,7 @@ from torch.utils.data import DataLoader
 
 import yaml
 import torchvision
+from torchvision.transforms import functional as TVF
 
 from diffusers import StableDiffusionPipeline, DDPMScheduler, UNet2DConditionModel
 from diffusers import DPMSolverMultistepScheduler
@@ -36,7 +37,7 @@ from src.data.images import ImageFolderDataset
 from src.model.dual_ip_attention import DualImageAttnProcessor
 from src.model.clip_text_model_wrapper import CLIPTextModelWrapper
 from src.model.id_conditioner_insightface import IDArcFaceConditioner
-from src.model.hair_conditioner_parsing import HairConditioner
+from src.model.hair_conditioner_parsing import HairConditioner, apply_mask_to_pil
 from src.utils.project_face_embs import project_face_embs
 
 
@@ -105,6 +106,35 @@ def _save_row(images_01: torch.Tensor, path: str):
     torchvision.utils.save_image(grid, path)
 
 @torch.no_grad()
+def _save_hair_debug_triplet(
+    *,
+    run_dir: Path,
+    step: int,
+    pil_images,
+    hair_masks: torch.Tensor,
+    hair_cond,
+):
+    """
+    Save: original | hair_mask | hair_masked
+    Useful for verifying that selected hair_class highlights actual hair.
+    """
+    out_dir = run_dir / "hair_debug"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    im = pil_images[0].convert("RGB").resize((512, 512))
+    m = hair_masks[0].detach().float().cpu().clamp(0, 1)  # [512,512]
+    mask_rgb = m.unsqueeze(0).repeat(3, 1, 1)
+    masked = apply_mask_to_pil(im, hair_masks[0], bg=hair_cond.bg_value)
+
+    t_orig = TVF.to_tensor(im)
+    t_masked = TVF.to_tensor(masked)
+    row = torch.stack([t_orig, mask_rgb, t_masked], dim=0)
+
+    path = out_dir / f"step_{step:07d}.png"
+    _save_row(row, str(path))
+    print(f"[hair debug] saved {path} mask_coverage={m.mean().item():.4f}")
+
+@torch.no_grad()
 def _img_pair_metrics(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-8):
     """
     a,b: [1,3,H,W] in [0,1]
@@ -165,6 +195,7 @@ def qualitative_check(
     dtype_unet: torch.dtype,
     num_steps: int,
     seed: int,
+    save_hair_debug: bool = True,
 ):
     """
     Saves: runs/<exp>/samples/step_XXXXXXX.png
@@ -180,6 +211,15 @@ def qualitative_check(
 
     hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
     hair_tokens = hair_tokens / (hair_tokens.norm(dim=-1, keepdim=True) + 1e-6)
+    hair_masks = hair_cond.get_hair_masks(pil_images)
+    if save_hair_debug:
+        _save_hair_debug_triplet(
+            run_dir=run_dir,
+            step=step,
+            pil_images=pil_images,
+            hair_masks=hair_masks,
+            hair_cond=hair_cond,
+        )
 
     # ID goes only through Arc2Face text stream in this setup.
     # For "id=0" ablations we feed an explicit empty Arc2Face embedding, not plain text.
@@ -396,6 +436,7 @@ def main(cfg_path: str):
         proj_dtype=torch.float32,
         bg_value=float(cfg["cond"].get("hair_bg_value", 0.0)),
     ).to(device)
+    print(f"[init] hair_class={hair_cond.enc_h.hair_class}")
 
     # Shortcut exp: FREEZE ID branch completely
     id_cond.eval()
@@ -626,6 +667,7 @@ def main(cfg_path: str):
                     dtype_unet=dtype_unet,
                     num_steps=int(cfg["eval"].get("num_inference_steps", 50)),
                     seed=int(cfg["eval"].get("seed", 123)),
+                    save_hair_debug=bool(cfg["eval"].get("debug_hair_masks", True)),
                 )
 
                 # restore modes

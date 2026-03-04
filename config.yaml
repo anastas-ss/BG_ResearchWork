@@ -5,6 +5,7 @@ seed: 42
 eval:
   hair_leak_check: true
   sanity_compare: true
+  debug_hair_masks: true
   #prompt: "a portrait photo of a person"
   enabled: true
   every_steps: 200
