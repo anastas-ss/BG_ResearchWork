@@ -6,8 +6,9 @@ import torch
 import torchvision
 from PIL import Image
 
-from diffusers import StableDiffusionPipeline, DPMSolverMultistepScheduler
+from diffusers import StableDiffusionPipeline, DPMSolverMultistepScheduler, UNet2DConditionModel
 
+from src.model.clip_text_model_wrapper import CLIPTextModelWrapper
 from src.model.dual_ip_attention import DualImageAttnProcessor
 from src.model.id_conditioner_insightface import IDArcFaceConditioner
 from src.model.hair_conditioner_parsing import HairConditioner, remove_hair_from_pil
@@ -146,6 +147,7 @@ def main():
     ap.add_argument("--pairs_csv", type=str, required=True)
     ap.add_argument("--out_dir", type=str, default="runs_infer/out")
     ap.add_argument("--sd_model_id", type=str, required=True)
+    ap.add_argument("--arc2face_repo_id", type=str, default="")
     ap.add_argument("--clip_vision_id", type=str, required=True)
     ap.add_argument("--hair_weights", type=str, required=True)
     ap.add_argument("--ckpt", type=str, required=True)
@@ -171,9 +173,22 @@ def main():
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # pipe
+    # pipe (optionally Arc2Face encoder+UNet on top of SD1.5 base)
+    text_encoder = None
+    unet_override = None
+    if args.arc2face_repo_id:
+        print(f"[init] loading Arc2Face modules from {args.arc2face_repo_id}")
+        text_encoder = CLIPTextModelWrapper.from_pretrained(
+            args.arc2face_repo_id, subfolder="encoder", torch_dtype=torch.float16
+        )
+        unet_override = UNet2DConditionModel.from_pretrained(
+            args.arc2face_repo_id, subfolder="arc2face", torch_dtype=torch.float16
+        )
+
     pipe = StableDiffusionPipeline.from_pretrained(
         args.sd_model_id,
+        text_encoder=text_encoder,
+        unet=unet_override,
         torch_dtype=torch.float16,
         safety_checker=None,
         requires_safety_checker=False,

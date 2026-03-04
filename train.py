@@ -28,12 +28,13 @@ from torch.utils.data import DataLoader
 import yaml
 import torchvision
 
-from diffusers import StableDiffusionPipeline, DDPMScheduler
+from diffusers import StableDiffusionPipeline, DDPMScheduler, UNet2DConditionModel
 from diffusers import DPMSolverMultistepScheduler
 
 from src.utils.repro import set_seed
 from src.data.images import ImageFolderDataset
 from src.model.dual_ip_attention import DualImageAttnProcessor
+from src.model.clip_text_model_wrapper import CLIPTextModelWrapper
 from src.model.id_conditioner_insightface import IDArcFaceConditioner
 from src.model.hair_conditioner_parsing import HairConditioner, remove_hair_from_pil
 from src.utils.project_face_embs import project_face_embs
@@ -280,9 +281,29 @@ def main(cfg_path: str):
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=2))
     (run_dir / "config.yaml").write_text(Path(cfg_path).read_text())
 
-    # Load Stable Diffusion
+    # Load base model; optionally replace text encoder + UNet with Arc2Face weights.
+    base_model_id = cfg["models"]["sd_model_id"]
+    arc2face_repo_id = cfg["models"].get("arc2face_repo_id")
+
+    text_encoder = None
+    unet_override = None
+    if arc2face_repo_id:
+        print(f"[init] loading Arc2Face modules from {arc2face_repo_id}")
+        text_encoder = CLIPTextModelWrapper.from_pretrained(
+            arc2face_repo_id,
+            subfolder="encoder",
+            torch_dtype=torch.float16,
+        )
+        unet_override = UNet2DConditionModel.from_pretrained(
+            arc2face_repo_id,
+            subfolder="arc2face",
+            torch_dtype=torch.float16,
+        )
+
     pipe = StableDiffusionPipeline.from_pretrained(
-        cfg["models"]["sd_model_id"],
+        base_model_id,
+        text_encoder=text_encoder,
+        unet=unet_override,
         torch_dtype=torch.float16,
         safety_checker=None,
         requires_safety_checker=False,

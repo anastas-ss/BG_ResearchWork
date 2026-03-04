@@ -18,6 +18,7 @@ data:
 
 models:
   sd_model_id: runwayml/stable-diffusion-v1-5
+  arc2face_repo_id: FoivosPar/Arc2Face
   clip_vision_id: openai/clip-vit-large-patch14
   hair_parsing_weights: /content/weights/79999_iter.pth   # пример: положишь сюда
 
