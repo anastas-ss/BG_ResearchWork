@@ -518,6 +518,10 @@ def main(cfg_path: str):
         float(cfg["train"].get("hair_aux_weight", 0.0)),
         "cross_hair_clip_weight=",
         float(cfg["train"].get("cross_hair_clip_weight", 0.0)),
+        "cross_hair_contrast_weight=",
+        float(cfg["train"].get("cross_hair_contrast_weight", 0.0)),
+        "cross_hair_margin=",
+        float(cfg["train"].get("cross_hair_margin", 0.1)),
         "cross_hair_clip_every=",
         int(cfg["train"].get("cross_hair_clip_every", 1)),
         "cross_hair_clip_batch=",
@@ -642,11 +646,13 @@ def main(cfg_path: str):
         enc_hair_only = {"text": text_emb_empty, "id": id_tokens, "hair": hair_tokens}
         hair_aux_weight = float(cfg["train"].get("hair_aux_weight", 0.0))
         cross_hair_clip_weight = float(cfg["train"].get("cross_hair_clip_weight", 0.0))
+        cross_hair_contrast_weight = float(cfg["train"].get("cross_hair_contrast_weight", 0.0))
+        cross_hair_margin = float(cfg["train"].get("cross_hair_margin", 0.1))
         cross_hair_clip_every = int(cfg["train"].get("cross_hair_clip_every", 1))
         cross_hair_clip_batch = int(cfg["train"].get("cross_hair_clip_batch", 2))
         cross_hair_decode_size = int(cfg["train"].get("cross_hair_decode_size", 256))
         need_cross_clip = (
-            (cross_hair_clip_weight > 0.0)
+            ((cross_hair_clip_weight > 0.0) or (cross_hair_contrast_weight > 0.0))
             and (B >= 2)
             and (step % max(1, cross_hair_clip_every) == 0)
         )
@@ -669,9 +675,13 @@ def main(cfg_path: str):
                     "hair": hair_tokens_cross[cross_idx],
                 }
 
-                ref_pooled = hair_cond._pooled_hair(pil_images).detach().float()     # [B, D]
-                ref_pooled = ref_pooled[src_idx][cross_idx]                           # [Bc, D]
-                ref_pooled = ref_pooled / (ref_pooled.norm(dim=-1, keepdim=True) + 1e-6)
+                ref_pooled_all = hair_cond._pooled_hair(pil_images).detach().float()  # [B, D]
+                # positive target: source-B hair embedding
+                ref_pooled_pos = ref_pooled_all[src_idx][cross_idx]                    # [Bc, D]
+                ref_pooled_pos = ref_pooled_pos / (ref_pooled_pos.norm(dim=-1, keepdim=True) + 1e-6)
+                # negative target: original source-A hair embedding
+                ref_pooled_neg = ref_pooled_all[cross_idx]                             # [Bc, D]
+                ref_pooled_neg = ref_pooled_neg / (ref_pooled_neg.norm(dim=-1, keepdim=True) + 1e-6)
                 hair_masks = hair_cond.get_hair_masks(pil_images).detach()            # [B,512,512]
                 hair_masks = hair_masks[src_idx][cross_idx].unsqueeze(1).to(device=device, dtype=torch.float32)
 
@@ -722,10 +732,19 @@ def main(cfg_path: str):
 
             pooled_cross = hair_cond.clip(pixel_values=clip_in).pooler_output.float()
             pooled_cross = pooled_cross / (pooled_cross.norm(dim=-1, keepdim=True) + 1e-6)
-            loss_cross_clip = (1.0 - (pooled_cross * ref_pooled).sum(dim=-1)).mean()
-            loss = loss + cross_hair_clip_weight * loss_cross_clip
+            d_pos = 1.0 - (pooled_cross * ref_pooled_pos).sum(dim=-1)
+            d_neg = 1.0 - (pooled_cross * ref_pooled_neg).sum(dim=-1)
+
+            loss_cross_clip = d_pos.mean()
+            loss_cross_contrast = F.relu(cross_hair_margin + d_pos - d_neg).mean()
+
+            if cross_hair_clip_weight > 0.0:
+                loss = loss + cross_hair_clip_weight * loss_cross_clip
+            if cross_hair_contrast_weight > 0.0:
+                loss = loss + cross_hair_contrast_weight * loss_cross_contrast
         else:
             loss_cross_clip = torch.zeros((), device=device, dtype=loss_main.dtype)
+            loss_cross_contrast = torch.zeros((), device=device, dtype=loss_main.dtype)
 
         if not torch.isfinite(loss):
             print(f"[step {step}] loss non-finite -> skipping")
@@ -740,7 +759,8 @@ def main(cfg_path: str):
         if step % log_every == 0:
             print(
                 f"[step {step}/{max_steps}] loss={loss.item():.6f} "
-                f"(main={loss_main.item():.6f}, hair_aux={loss_hair.item():.6f}, cross_clip={loss_cross_clip.item():.6f})"
+                f"(main={loss_main.item():.6f}, hair_aux={loss_hair.item():.6f}, "
+                f"cross_clip={loss_cross_clip.item():.6f}, cross_ctr={loss_cross_contrast.item():.6f})"
             )
 
         # Qualitative sampling

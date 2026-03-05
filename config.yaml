@@ -35,7 +35,9 @@ train:
   lr: 7e-5
   dual_lr_mult: 1.5
   hair_aux_weight: 0.35
-  cross_hair_clip_weight: 0.25
+  cross_hair_clip_weight: 0.2
+  cross_hair_contrast_weight: 0.2
+  cross_hair_margin: 0.1
   cross_hair_clip_every: 2
   cross_hair_clip_batch: 1
   cross_hair_decode_size: 256
