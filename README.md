@@ -125,6 +125,12 @@ train:
 Подготовить `pairs.csv` с колонками:
 - `pair_id,ref_id,ref_hair`
 
+После запуска `inference.py` структура выходов такая:
+- `out_dir/<pair_id>/gen.png`
+- `out_dir/<pair_id>/ref_id.png`
+- `out_dir/<pair_id>/ref_hair.png`
+- `out_dir/manifest.csv`
+
 Запуск:
 
 ```bash
@@ -136,6 +142,25 @@ python inference.py \
   --clip_vision_id openai/clip-vit-large-patch14 \
   --hair_weights /path/to/79999_iter.pth \
   --ckpt /path/to/ckpt_stepXXXX.pt \
+  --scale_id 0.0 \
+  --scale_hair 1.0 \
+  --hair_class 17
+```
+
+Готовая ячейка для Colab:
+
+```bash
+!cd /content/BG_ResearchWork && python inference.py \
+  --pairs_csv /content/pairs.csv \
+  --out_dir /content/infer_out \
+  --sd_model_id runwayml/stable-diffusion-v1-5 \
+  --arc2face_repo_id FoivosPar/Arc2Face \
+  --clip_vision_id openai/clip-vit-large-patch14 \
+  --hair_weights /content/weights/79999_iter.pth \
+  --ckpt /content/BG_ResearchWork/runs/method1_clip_shortcut/ckpt_step2000.pt \
+  --steps 30 \
+  --guidance 7.0 \
+  --seed 123 \
   --scale_id 0.0 \
   --scale_hair 1.0 \
   --hair_class 17
@@ -157,6 +182,43 @@ python metrics.py \
   --gen_dir /path/to/infer_out \
   --hair_weights /path/to/79999_iter.pth \
   --device cuda
+```
+
+По умолчанию `metrics.py` ищет генерации в формате:
+- `--gen_pattern "{pair_id}/gen.png"`
+
+Это уже совместимо с текущим `inference.py`.
+
+Готовые ячейки для Colab:
+
+```bash
+!pip -q install -U scipy pandas
+```
+
+```bash
+!cd /content/BG_ResearchWork && python metrics.py \
+  --pairs_csv /content/pairs.csv \
+  --gen_dir /content/infer_out \
+  --hair_weights /content/weights/79999_iter.pth \
+  --hair_class 17 \
+  --device cuda \
+  --seeds 123 \
+  --out_csv /content/infer_out/metrics_results.csv
+```
+
+Опционально с FID/FID-CLIP:
+
+```bash
+!cd /content/BG_ResearchWork && python metrics.py \
+  --pairs_csv /content/pairs.csv \
+  --gen_dir /content/infer_out \
+  --hair_weights /content/weights/79999_iter.pth \
+  --hair_class 17 \
+  --device cuda \
+  --seeds 123 \
+  --compute_fid 1 \
+  --fid_preprocess face_parsing \
+  --out_csv /content/infer_out/metrics_results_fid.csv
 ```
 
 ## Частые проблемы

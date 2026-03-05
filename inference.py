@@ -123,13 +123,14 @@ def generate_one(
     latents = torch.randn((1, 4, H // vae_sf, W // vae_sf), device=device, dtype=dtype_unet, generator=gen)
 
     scheduler.set_timesteps(num_steps, device=device)
-    x = latents
+    x = latents * scheduler.init_noise_sigma
 
     for t in scheduler.timesteps:
         t_batch = torch.tensor([int(t)], device=device, dtype=torch.long)
-        with torch.cuda.amp.autocast(dtype=torch.float16):
-            eps_u = pipe.unet(x, t_batch, encoder_hidden_states=enc_uncond).sample
-            eps_c = pipe.unet(x, t_batch, encoder_hidden_states=enc_cond).sample
+        x_in = scheduler.scale_model_input(x, t)
+        with torch.amp.autocast("cuda", dtype=torch.float16):
+            eps_u = pipe.unet(x_in, t_batch, encoder_hidden_states=enc_uncond).sample
+            eps_c = pipe.unet(x_in, t_batch, encoder_hidden_states=enc_cond).sample
         eps = eps_u + guidance_scale * (eps_c - eps_u)
         x = scheduler.step(eps, t, x).prev_sample
 

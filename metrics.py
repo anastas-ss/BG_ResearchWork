@@ -1,4 +1,3 @@
-```python
 # metrics.py
 # Evaluation for A2F project (SD1.5 + DualImageAttnProcessor):
 # - ID preservation: ArcFace cosine similarity
@@ -463,9 +462,16 @@ def preprocess_for_fid(
 # =========================
 # Main evaluation
 # =========================
-def resolve_generated_path(gen_dir: str, pair_id: int, seed: int, pattern: str) -> str:
-    # pattern can use {pair_id} and {seed}
-    return str(Path(gen_dir) / pattern.format(pair_id=pair_id, seed=seed))
+def resolve_generated_path(gen_dir: str, pair_id: str, seed: int, pattern: str) -> str:
+    # pattern can use {pair_id}, {seed}, and optionally {pair_id_int}
+    try:
+        pair_id_int = int(pair_id)
+    except Exception:
+        pair_id_int = pair_id
+    return str(
+        Path(gen_dir)
+        / pattern.format(pair_id=pair_id, pair_id_int=pair_id_int, seed=seed)
+    )
 
 
 def parse_seeds(seeds_str: str) -> List[int]:
@@ -481,8 +487,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pairs_csv", type=str, required=True)
     ap.add_argument("--gen_dir", type=str, required=True)
-    ap.add_argument("--gen_pattern", type=str, default="{pair_id}_{seed}.png")
-    ap.add_argument("--seeds", type=str, default="0")  # "0" or "0,1,2" or "0-3"
+    ap.add_argument("--gen_pattern", type=str, default="{pair_id}/gen.png")
+    ap.add_argument("--seeds", type=str, default="123")  # "0" or "0,1,2" or "0-3"
 
     ap.add_argument("--device", type=str, default="cuda")
 
@@ -512,7 +518,7 @@ def main():
     device = args.device
     seeds = parse_seeds(args.seeds)
 
-    pairs = pd.read_csv(args.pairs_csv)
+    pairs = pd.read_csv(args.pairs_csv, dtype={"pair_id": str})
     # allow either pair_id column or implicit row index
     if "pair_id" not in pairs.columns:
         pairs = pairs.reset_index().rename(columns={"index": "pair_id"})
@@ -544,7 +550,7 @@ def main():
     missing_gen = 0
 
     for _, r in tqdm(pairs.iterrows(), total=len(pairs), desc="pairs"):
-        pair_id = int(r["pair_id"])
+        pair_id = str(r["pair_id"])
         ref_id_path = str(r["ref_id"])
         ref_hair_path = str(r["ref_hair"])
 
@@ -659,4 +665,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
