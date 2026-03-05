@@ -167,11 +167,7 @@ python metrics.py \
 - уменьшить `cross_hair_clip_batch`
 - оставить `cross_hair_decode_size=256`
 
-2. **Маска выделяет не волосы**
-- проверить `cond.hair_class` (для BiSeNet обычно `17`)
-- смотреть `hair_debug` картинки
-
-3. **`cross_hair` почти не отличается от `both_on`**
+2. **`cross_hair` почти не отличается от `both_on`**
 - увеличить `cross_hair_clip_weight`
 - уменьшить `cross_hair_clip_every`
 - затем контролировать артефакты (слишком сильный cross-loss может портить лицо)
