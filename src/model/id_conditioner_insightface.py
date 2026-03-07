@@ -5,8 +5,6 @@ import torch.nn.functional as F
 from PIL import Image
 
 from insightface.app import FaceAnalysis
-import numpy as np
-import torch
 
 
 class InsightFaceArcFaceEmbedder:
@@ -18,7 +16,7 @@ class InsightFaceArcFaceEmbedder:
             else ["CPUExecutionProvider"]
         )
 
-        # Грузим ТОЛЬКО нужные модули
+        # Загружаем только модули детекции и распознавания.
         self.app = FaceAnalysis(
             name="antelopev2",
             root=model_root,
@@ -28,7 +26,7 @@ class InsightFaceArcFaceEmbedder:
 
         self.app.prepare(ctx_id=ctx_id, det_size=(max_size, max_size))
 
-        # sanity check — чтобы точно грузился arcface
+        # Логируем используемую модель распознавания.
         print("Recognition model:", self.app.models["recognition"].model_file)
 
         self.det_sizes = [(size, size) for size in range(max_size, min_size - 1, -step)]
@@ -87,8 +85,8 @@ class IDArcFaceConditioner(nn.Module):
 
     def embs_to_tokens(self, embs: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
         """
-        Deterministic frozen mapping from ArcFace embeddings to cross-attention tokens.
-        - embs: [B, 512], expected normalized
+        Детерминированное frozen-преобразование ArcFace embedding в токены cross-attention.
+        - embs: [B, 512], ожидаются нормализованными
         - returns: [B, n_tokens, cross_dim]
         """
         if embs.dim() != 2 or embs.shape[1] != 512:
@@ -105,9 +103,9 @@ class IDArcFaceConditioner(nn.Module):
     @torch.no_grad()
     def extract_arcface_embs(self, pil_list, return_mask: bool = False, eps: float = 1e-12):
         """
-        Returns:
-          embs: (B,512) torch on self.device, L2-normalized (float32)
-          mask: (B,) bool torch on self.device  (optional)
+        Возвращает:
+          embs: (B,512) torch на self.device, L2-нормализованные (float32)
+          mask: (B,) bool torch на self.device (опционально)
         """
         out = self.embedder(pil_list, return_mask=return_mask)
     
@@ -119,7 +117,7 @@ class IDArcFaceConditioner(nn.Module):
             embs = out.to(self.device, dtype=torch.float32)
             mask = None
     
-        # L2 normalize (ArcFace embeddings обычно уже близки к норм, но нормализуем гарантированно)
+        # L2-нормализация перед проекцией.
         embs = embs / (embs.norm(dim=-1, keepdim=True).clamp_min(eps))
     
         if return_mask:

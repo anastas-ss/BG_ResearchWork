@@ -457,7 +457,7 @@ def main(cfg_path: str):
     ).to(device)
     print(f"[init] hair_class={hair_cond.enc_h.hair_class}")
 
-    # Shortcut exp: FREEZE ID branch completely
+    # ID-ветка остается замороженной.
     id_cond.eval()
     id_cond.requires_grad_(False)
 
@@ -472,7 +472,6 @@ def main(cfg_path: str):
         collate_fn=collate_keep_pil,
         drop_last=True,
     )
-    # Пример вызова после инициализации моделей и DataLoader:
     sanity_check_tokens(pipe, id_cond, hair_cond, dl, dtype_unet)
 
     # Train only hair projection + hair branch inside DualImageAttnProcessor
@@ -507,9 +506,9 @@ def main(cfg_path: str):
     def count_trainable(m):
         return sum(p.numel() for p in m.parameters() if p.requires_grad)
 
-    print("trainable id_cond:", count_trainable(id_cond))            # 0
+    print("trainable id_cond:", count_trainable(id_cond))
     print("trainable hair_cond:", count_trainable(hair_cond))
-    print("trainable hair_proj:", count_trainable(hair_cond.proj))   # > 0
+    print("trainable hair_proj:", count_trainable(hair_cond.proj))
     print(
         "lr hair_proj=", float(cfg["train"]["lr"]),
         "lr dual=",

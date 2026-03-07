@@ -6,20 +6,20 @@ from PIL import Image
 def hair_leakage_check_one(
     *,
     pil: Image.Image,
-    hair_cond,         # твой HairConditioner (с debug_save=True)
-    face_app,          # insightface.app.FaceAnalysis
-    arcface_embedder,  # твой InsightFaceArcFaceEmbedder (или просто FaceAnalysis + faces[0].embedding)
+    hair_cond,
+    face_app,
+    arcface_embedder,
     out_prefix="leak",
 ):
-    # 1) получаем hair_masked картинку так же, как в hair_cond
+    # Сохраняем hair-masked изображение, сформированное HairConditioner.
     hair_cond.debug_save = True
-    _ = hair_cond([pil], out_dtype=torch.float16)   # триггерит debug_hair.png
+    _ = hair_cond([pil], out_dtype=torch.float16)
     hair_masked = Image.open("debug_hair.png").convert("RGB")
 
     pil.save(f"{out_prefix}_orig.png")
     hair_masked.save(f"{out_prefix}_hair_masked.png")
 
-    # 2) ищем лицо на hair_masked (если находится — лицо явно “протекает” в визуальном смысле)
+    # Проверяем, детектируется ли лицо на hair-masked изображении.
     img_bgr = np.array(hair_masked)[:, :, ::-1]
     faces = face_app.get(img_bgr)
     if len(faces) == 0:
@@ -33,7 +33,7 @@ def hair_leakage_check_one(
     crop.save(f"{out_prefix}_face_cut_from_hair.png")
     print("[leak] face detected on hair_masked -> визуальная утечка вероятна")
 
-    # 3) ArcFace similarity: orig vs hair_masked
+    # ArcFace similarity между исходным и hair-masked изображением.
     emb_orig = arcface_embedder([pil])[0].float().cpu().numpy()
     emb_hair = arcface_embedder([hair_masked])[0].float().cpu().numpy()
 
