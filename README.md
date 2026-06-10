@@ -8,6 +8,7 @@
 - **SD1.5** как frozen backbone (VAE/UNet/Text Encoder не дообучаются полностью)
 - **Arc2Face-путь для ID**: embedding лица извлекается из исходного фото, не обучается и встраивается в prompt-эмбеддинги
 - **Отдельная обучаемая hair-ветка**: сегментация волос (BiSeNet) -> CLIP Vision -> projection в cross-attention
+- **Опциональная ID-ветка в dual-attention**: по умолчанию выключена; ID идет через frozen Arc2Face text stream
 
 Цель: генерировать лицо с сохранением identity и контролем прически.
 
@@ -43,11 +44,27 @@ pip install -U diffusers transformers accelerate safetensors einops opencv-pytho
 pip install insightface==0.7.3 onnxruntime-gpu
 ```
 
+или:
+
+```bash
+# torch/torchvision поставь отдельно под CUDA кластера
+pip install -r requirements.txt
+```
+
 Также нужны веса BiSeNet (face parsing):
 - положить файл `79999_iter.pth` (или совместимый) и указать путь в `config.yaml`:
   - `models.hair_parsing_weights`
 
 И модели InsightFace `antelopev2` должны быть доступны в `./models/antelopev2`.
+При необходимости можно явно задать root:
+- через конфиг `models.insightface_root`
+- или переменной окружения `INSIGHTFACE_MODEL_ROOT`
+
+Ожидаемая структура:
+
+```text
+<INSIGHTFACE_MODEL_ROOT>/models/antelopev2/*.onnx
+```
 
 ## Данные
 
@@ -62,6 +79,14 @@ pip install insightface==0.7.3 onnxruntime-gpu
 
 ```bash
 python train.py --cfg config.yaml
+```
+
+Для кластера удобно сделать отдельный конфиг:
+
+```bash
+cp config.cluster.example.yaml config.cluster.yaml
+# затем поправить пути под кластер
+python train.py --cfg config.cluster.yaml
 ```
 
 Артефакты сохраняются в:
@@ -94,6 +119,12 @@ python train.py --cfg config.yaml
 - `train.cross_hair_clip_every`
 - `train.cross_hair_clip_batch`
 - `train.cross_hair_decode_size`
+
+### Скорость / profiling
+- `train.cache_arcface_embs` — кеш ArcFace embedding по `path` в RAM (ускоряет CPU bottleneck на face extraction)
+- `train.arcface_cache_max_items` — лимит элементов кеша
+- `train.profile_timing` — включает timing по блокам training loop
+- `train.profile_every` — как часто печатать `[timing avg/...]`
 
 #### Быстрые пресеты
 
@@ -142,9 +173,17 @@ python inference.py \
   --clip_vision_id openai/clip-vit-large-patch14 \
   --hair_weights /path/to/79999_iter.pth \
   --ckpt /path/to/ckpt_stepXXXX.pt \
+  --insightface_root /path/to/insightface_root \
   --scale_id 0.0 \
-  --scale_hair 1.0 \
-  --hair_class 17
+  --scale_hair 0.65 \
+  --use_id_tokens 0 \
+  --hair_class 17 \
+  --hair_classes 17 \
+  --hair_mask_dilate_kernel 1 \
+  --hair_mask_dilate_iters 1 \
+  --hair_focus_crop 1 \
+  --hair_focus_crop_margin 0.20 \
+  --hair_focus_crop_square 1
 ```
 
 Готовая ячейка для Colab:
@@ -162,8 +201,15 @@ python inference.py \
   --guidance 7.0 \
   --seed 123 \
   --scale_id 0.0 \
-  --scale_hair 1.0 \
-  --hair_class 17
+  --scale_hair 0.65 \
+  --use_id_tokens 0 \
+  --hair_class 17 \
+  --hair_classes 17 \
+  --hair_mask_dilate_kernel 1 \
+  --hair_mask_dilate_iters 1 \
+  --hair_focus_crop 1 \
+  --hair_focus_crop_margin 0.20 \
+  --hair_focus_crop_square 1
 ```
 
 ## Метрики
@@ -181,6 +227,7 @@ python metrics.py \
   --pairs_csv /path/to/pairs.csv \
   --gen_dir /path/to/infer_out \
   --hair_weights /path/to/79999_iter.pth \
+  --insightface_root /path/to/insightface_root \
   --device cuda
 ```
 
@@ -233,6 +280,31 @@ python metrics.py \
 - увеличить `cross_hair_clip_weight`
 - уменьшить `cross_hair_clip_every`
 - затем контролировать артефакты (слишком сильный cross-loss может портить лицо)
+
+## Запуск на кластере (SLURM)
+
+В репозитории есть готовые шаблоны:
+- `scripts/train.sbatch`
+- `scripts/infer.sbatch`
+- `scripts/metrics.sbatch`
+
+Базовый сценарий:
+
+```bash
+cp config.cluster.example.yaml config.cluster.yaml
+# отредактировать пути в config.cluster.yaml
+
+python scripts/preflight.py --cfg config.cluster.yaml
+mkdir -p logs
+sbatch scripts/train.sbatch
+```
+
+Проверка статуса:
+
+```bash
+squeue -u $USER
+tail -f logs/bg-train_<jobid>.out
+```
 
 ## Примечание
 

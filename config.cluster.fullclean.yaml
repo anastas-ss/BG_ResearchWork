@@ -1,27 +1,29 @@
-
-exp_name: method1_clip_shortcut
+exp_name: method1_ffhq_clean_full
 seed: 42
 
 eval:
-  hair_leak_check: true
-  sanity_compare: true
+  hair_leak_check: false
+  sanity_compare: false
   debug_hair_masks: true
-  #prompt: "a portrait photo of a person"
   enabled: true
   every_steps: 200
   seed: 123
   num_inference_steps: 50
 
 data:
-  train_dir: /content/datasets/ffhq_sub/train
-  val_dir: /content/datasets/ffhq_sub/val
+  # Clean full FFHQ pool (symlink-based, no destructive deletion in source).
+  train_dir: /home/arobryadchikova/datasets/FFHQ_clean_nohat_nohairmiss
+  # Keep val on the same cleaned pool unless/until a separate split is prepared.
+  val_dir: /home/arobryadchikova/datasets/FFHQ_clean_nohat_nohairmiss
   image_size: 512
 
 models:
   sd_model_id: runwayml/stable-diffusion-v1-5
   arc2face_repo_id: FoivosPar/Arc2Face
   clip_vision_id: openai/clip-vit-large-patch14
-  hair_parsing_weights: /content/weights/79999_iter.pth
+  hair_parsing_weights: /home/arobryadchikova/weights/79999_iter.pth
+  insightface_root: /home/arobryadchikova/.cache/insightface
+  insightface_device: cuda
 
 cond:
   n_tokens: 4
@@ -43,20 +45,29 @@ train:
   train_id_proj: false
   id_proj_lr_mult: 0.5
   only_both_face: true
+  cache_arcface_embs: true
+  arcface_cache_max_items: 50000
+  profile_timing: false
+  profile_sync_cuda: false
+  profile_every: 25
+
   batch_size: 2
   lr: 7e-5
   dual_lr_mult: 1.5
-  hair_aux_weight: 0.35
-  cross_hair_clip_weight: 0.2
-  cross_hair_contrast_weight: 0.2
+
+  hair_aux_weight: 0.45
+  cross_hair_clip_weight: 0.15
+  cross_hair_contrast_weight: 0.20
   cross_hair_margin: 0.1
   cross_hair_clip_every: 2
-  cross_hair_clip_batch: 1
+  cross_hair_clip_batch: 2
   cross_hair_decode_size: 256
+  cross_min_hair_coverage: 0.02
+
   weight_decay: 0.0
-  max_steps: 5000
+  max_steps: 10000
   log_every: 25
-  save_every: 500
+  save_every: 250
   mixed_precision: fp16
 
 infer:

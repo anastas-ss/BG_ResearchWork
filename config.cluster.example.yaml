@@ -1,0 +1,83 @@
+exp_name: method1_cluster_run
+seed: 42
+
+eval:
+  hair_leak_check: false
+  sanity_compare: false
+  # Keep periodic qualitative snapshots during training
+  # (runs/<exp>/samples/step_XXXXXXX.png and hair_debug/*).
+  debug_hair_masks: true
+  enabled: true
+  every_steps: 200
+  seed: 123
+  num_inference_steps: 50
+
+data:
+  train_dir: /path/to/datasets/ffhq_sub/train
+  val_dir: /path/to/datasets/ffhq_sub/val
+  image_size: 512
+
+models:
+  sd_model_id: runwayml/stable-diffusion-v1-5
+  arc2face_repo_id: FoivosPar/Arc2Face
+  clip_vision_id: openai/clip-vit-large-patch14
+  hair_parsing_weights: /path/to/weights/79999_iter.pth
+  # Should point to a directory that contains models/antelopev2.
+  # Example:
+  #   /home/<username>/.cache/insightface
+  # so antelopev2 is here:
+  #   /home/<username>/.cache/insightface/models/antelopev2
+  insightface_root: /path/to/insightface_root
+
+cond:
+  n_tokens: 4
+  use_id_tokens: false
+  # deterministic | projected | hybrid
+  id_token_mode: deterministic
+  id_token_mix: 0.5
+  # Recommended anti-leakage preset: keep explicit ID-token branch off.
+  scale_id: 0.0
+  scale_hair: 0.65
+  hair_bg_value: 0.0
+  hair_class: 17
+  # Start with hair-only class to reduce face/headwear leakage into conditioner.
+  hair_classes: [17]
+  hair_mask_dilate_kernel: 1
+  hair_mask_dilate_iters: 1
+  hair_focus_crop: false
+  hair_focus_crop_margin: 0.20
+  hair_focus_crop_square: true
+
+train:
+  train_id_proj: false
+  id_proj_lr_mult: 0.5
+  only_both_face: true
+  # Speed/monitoring toggles for cluster runs
+  cache_arcface_embs: true
+  arcface_cache_max_items: 50000
+  profile_timing: false
+  profile_sync_cuda: false
+  profile_every: 25
+
+  batch_size: 2
+  lr: 7e-5
+  dual_lr_mult: 1.5
+  # Strengthen hair supervision compared to the minimal baseline.
+  hair_aux_weight: 0.45
+  cross_hair_clip_weight: 0.15
+  cross_hair_contrast_weight: 0.20
+  cross_hair_margin: 0.1
+  # Compute cross-hair signal more often.
+  cross_hair_clip_every: 2
+  cross_hair_clip_batch: 2
+  cross_hair_decode_size: 256
+  cross_min_hair_coverage: 0.02
+  weight_decay: 0.0
+  # Train longer; early runs at ~3k steps are usually underfit.
+  max_steps: 10000
+  log_every: 25
+  save_every: 250
+  mixed_precision: fp16
+
+infer:
+  steps: 30
