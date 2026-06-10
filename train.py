@@ -17,8 +17,10 @@
 #   python train.py --cfg config.yaml
 
 import argparse
+import inspect
 import json
 import time
+from collections import defaultdict, OrderedDict
 from pathlib import Path
 
 import torch
@@ -33,7 +35,7 @@ from diffusers import StableDiffusionPipeline, DDPMScheduler, UNet2DConditionMod
 from diffusers import DPMSolverMultistepScheduler
 
 from src.utils.repro import set_seed
-from src.data.images import ImageFolderDataset
+from src.data.images import ImageFolderDataset, PairedImageDataset
 from src.model.dual_ip_attention import DualImageAttnProcessor
 from src.model.clip_text_model_wrapper import CLIPTextModelWrapper
 from src.model.id_conditioner_insightface import IDArcFaceConditioner
@@ -46,7 +48,20 @@ def collate_keep_pil(batch_list):
     pixel_values = torch.stack([b["pixel_values"] for b in batch_list], dim=0)  # [B,3,H,W] float
     pil = [b["pil"] for b in batch_list]  # list[PIL.Image]
     path = [b["path"] for b in batch_list]
-    return {"pixel_values": pixel_values, "pil": pil, "path": path}
+    out = {"pixel_values": pixel_values, "pil": pil, "path": path}
+    optional_keys = [
+        "id_pil",
+        "id_path",
+        "hair_pil",
+        "hair_path",
+        "pair_id",
+        "target_cluster",
+        "hair_cluster",
+    ]
+    for key in optional_keys:
+        if key in batch_list[0]:
+            out[key] = [b[key] for b in batch_list]
+    return out
 
 @torch.no_grad()
 def sanity_check_tokens(pipe, id_cond, hair_cond, dl, dtype_unet, n_samples=4):
@@ -57,7 +72,8 @@ def sanity_check_tokens(pipe, id_cond, hair_cond, dl, dtype_unet, n_samples=4):
     3) Выводим mean и norm для проверки
     """
     batch = next(iter(dl))
-    pil_images = batch["pil"][:n_samples]
+    pil_images = batch.get("id_pil", batch["pil"])[:n_samples]
+    hair_images = batch.get("hair_pil", batch["pil"])[:n_samples]
     B = len(pil_images)
 
     # ID tokens
@@ -65,7 +81,7 @@ def sanity_check_tokens(pipe, id_cond, hair_cond, dl, dtype_unet, n_samples=4):
     id_tokens = id_cond.embs_to_tokens(face_embs_512, out_dtype=dtype_unet)
 
     # Hair tokens
-    hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
+    hair_tokens = hair_cond(hair_images, out_dtype=dtype_unet)
     hair_tokens = hair_tokens / (hair_tokens.norm(dim=-1, keepdim=True) + 1e-6)
 
     print("\n=== Sanity Check Tokens ===")
@@ -148,6 +164,52 @@ def _img_pair_metrics(a: torch.Tensor, b: torch.Tensor, eps: float = 1e-8):
 
 
 @torch.no_grad()
+def select_cross_source_indices(
+    hair_tokens: torch.Tensor,
+    hair_masks: torch.Tensor | None = None,
+    min_hair_coverage: float = 0.02,
+) -> torch.Tensor:
+    """
+    Pick source-B index for each sample:
+    prefer most dissimilar hair token among candidates with enough hair coverage.
+    """
+    bsz = hair_tokens.shape[0]
+    device = hair_tokens.device
+    if bsz < 2:
+        return torch.arange(bsz, device=device, dtype=torch.long)
+
+    flat = hair_tokens.detach().float().reshape(bsz, -1)
+    flat = flat / (flat.norm(dim=-1, keepdim=True) + 1e-8)
+    sim = flat @ flat.t()
+    sim.fill_diagonal_(2.0)
+
+    if hair_masks is not None:
+        cov = hair_masks.detach().float().mean(dim=(1, 2))
+        eligible = cov >= float(min_hair_coverage)
+    else:
+        cov = None
+        eligible = torch.ones(bsz, device=device, dtype=torch.bool)
+
+    src = []
+    for i in range(bsz):
+        cand = eligible.clone()
+        cand[i] = False
+        if cand.any():
+            row = sim[i].clone()
+            row[~cand] = 2.0
+            j = int(row.argmin().item())
+        else:
+            if cov is not None:
+                cov_row = cov.clone()
+                cov_row[i] = -1.0
+                j = int(cov_row.argmax().item())
+            else:
+                j = (i + 1) % bsz
+        src.append(j)
+    return torch.tensor(src, device=device, dtype=torch.long)
+
+
+@torch.no_grad()
 def sample_with_cfg(
     pipe,
     scheduler,
@@ -189,6 +251,7 @@ def qualitative_check(
     scheduler,
     pixel_values: torch.Tensor,  # [B,3,H,W] in [-1,1] (dtype_unet)
     pil_images,                  # list[PIL]
+    hair_pil_images=None,        # list[PIL] for hair condition; defaults to pil_images
     text_emb: torch.Tensor,      # [B,T,D] (dtype_unet)
     id_cond,
     hair_cond,
@@ -196,6 +259,8 @@ def qualitative_check(
     num_steps: int,
     seed: int,
     save_hair_debug: bool = True,
+    cross_min_hair_coverage: float = 0.02,
+    use_id_tokens: bool = False,
 ):
     """
     Saves: runs/<exp>/samples/step_XXXXXXX.png
@@ -206,27 +271,33 @@ def qualitative_check(
 
     B, _, H, W = pixel_values.shape
     vae_sf = pipe.vae_scale_factor if hasattr(pipe, "vae_scale_factor") else 8
+    hair_pil_images = hair_pil_images if hair_pil_images is not None else pil_images
 
     face_mask = torch.ones(len(pil_images), device=pixel_values.device, dtype=torch.bool)
 
-    hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)
+    hair_tokens = hair_cond(hair_pil_images, out_dtype=dtype_unet)
     hair_tokens = hair_tokens / (hair_tokens.norm(dim=-1, keepdim=True) + 1e-6)
-    hair_masks = hair_cond.get_hair_masks(pil_images)
+    hair_masks = hair_cond.get_hair_masks(hair_pil_images)
     if save_hair_debug:
         _save_hair_debug_triplet(
             run_dir=run_dir,
             step=step,
-            pil_images=pil_images,
+            pil_images=hair_pil_images,
             hair_masks=hair_masks,
             hair_cond=hair_cond,
         )
 
-    # ID goes only through Arc2Face text stream in this setup.
+    # Arc2Face text stream is always present.
+    # Additional id_tokens branch is optional (controlled by use_id_tokens).
     # For "id=0" ablations we feed an explicit empty Arc2Face embedding, not plain text.
     with torch.no_grad():
         face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_images, return_mask=True)
         text_emb_empty = project_face_embs(pipe, torch.zeros_like(face_embs_512)).to(dtype_unet)
-    id_tokens = torch.zeros_like(hair_tokens)
+    if use_id_tokens:
+        id_tokens = id_cond.embs_to_tokens(face_embs_512, out_dtype=dtype_unet)
+        id_tokens = id_tokens / (id_tokens.norm(dim=-1, keepdim=True) + 1e-6)
+    else:
+        id_tokens = torch.zeros_like(hair_tokens)
     
     print("has_face:", face_mask.tolist())
 
@@ -272,16 +343,15 @@ def qualitative_check(
     src_img_b = None
     src_img_b_masked = None
     if B >= 2:
-        # pick most dissimilar hair token in batch for each sample
-        flat = hair_tokens.detach().float().reshape(B, -1)
-        flat = flat / (flat.norm(dim=-1, keepdim=True) + 1e-8)
-        sim = flat @ flat.t()
-        sim.fill_diagonal_(2.0)
-        src_idx = sim.argmin(dim=1)
+        src_idx = select_cross_source_indices(
+            hair_tokens=hair_tokens,
+            hair_masks=hair_masks,
+            min_hair_coverage=float(cross_min_hair_coverage),
+        )
         hair_tokens_cross = hair_tokens[src_idx]
         cross_src_idx0 = int(src_idx[0].item())
-        src_img_b = (pixel_values[cross_src_idx0:cross_src_idx0 + 1].float() * 0.5 + 0.5).clamp(0, 1)
-        pil_b = pil_images[cross_src_idx0].convert("RGB").resize((W, H))
+        pil_b = hair_pil_images[cross_src_idx0].convert("RGB").resize((W, H))
+        src_img_b = TVF.to_tensor(pil_b).unsqueeze(0).to(device=pixel_values.device, dtype=torch.float32)
         pil_b_masked = apply_mask_to_pil(pil_b, hair_masks[cross_src_idx0], bg=hair_cond.bg_value)
         src_img_b_masked = TVF.to_tensor(pil_b_masked).unsqueeze(0)
         variants.append(("cross_hair", text_emb, id_tokens, hair_tokens_cross, 3.0))
@@ -333,6 +403,93 @@ def qualitative_check(
 def load_cfg(path: str):
     with open(path, "r") as f:
         return yaml.safe_load(f)
+
+
+def resolve_hair_classes(cond_cfg: dict):
+    vals = cond_cfg.get("hair_classes", None)
+    if vals is None:
+        return [int(cond_cfg.get("hair_class", 17))]
+    if isinstance(vals, int):
+        return [int(vals)]
+    if isinstance(vals, str):
+        return [int(x.strip()) for x in vals.split(",") if x.strip()]
+    return [int(v) for v in vals]
+
+
+def build_hair_conditioner_compat(**kwargs):
+    """
+    Backward-compatible HairConditioner constructor.
+    If running with an older HairConditioner signature, extra kwargs are dropped.
+    """
+    sig = inspect.signature(HairConditioner.__init__)
+    supported = set(sig.parameters.keys()) - {"self"}
+    filtered = {k: v for k, v in kwargs.items() if k in supported}
+    dropped = sorted([k for k in kwargs.keys() if k not in supported])
+    if dropped:
+        print(f"[warn] HairConditioner ignores unsupported args on this code version: {dropped}")
+    return HairConditioner(**filtered)
+
+
+@torch.no_grad()
+def extract_arcface_embs_cached(
+    *,
+    id_cond,
+    pil_images,
+    image_paths,
+    cache: OrderedDict,
+    max_items: int,
+    use_cache: bool,
+    stats: dict | None = None,
+):
+    """
+    Caches ArcFace embeddings by image path in CPU RAM.
+    Returns:
+      embs: (B,512) float32 on id_cond.device
+      mask: (B,) bool on id_cond.device
+    """
+    if (not use_cache) or (image_paths is None) or (len(image_paths) != len(pil_images)):
+        return id_cond.extract_arcface_embs(pil_images, return_mask=True)
+
+    bsz = len(pil_images)
+    embs_cpu = [None] * bsz
+    mask_list = [False] * bsz
+    miss_idx = []
+    miss_pil = []
+    miss_paths = []
+
+    for i, p in enumerate(image_paths):
+        key = str(p)
+        item = cache.get(key)
+        if item is None:
+            miss_idx.append(i)
+            miss_pil.append(pil_images[i])
+            miss_paths.append(key)
+            if stats is not None:
+                stats["miss"] += 1
+        else:
+            emb_cpu, has_face = item
+            embs_cpu[i] = emb_cpu
+            mask_list[i] = bool(has_face)
+            cache.move_to_end(key)
+            if stats is not None:
+                stats["hit"] += 1
+
+    if miss_idx:
+        miss_embs, miss_mask = id_cond.extract_arcface_embs(miss_pil, return_mask=True)
+        miss_embs_cpu = miss_embs.detach().cpu()
+        miss_mask_cpu = miss_mask.detach().cpu()
+
+        for local_i, key, emb_cpu, mk in zip(miss_idx, miss_paths, miss_embs_cpu, miss_mask_cpu):
+            has_face = bool(mk.item())
+            embs_cpu[local_i] = emb_cpu
+            mask_list[local_i] = has_face
+            cache[key] = (emb_cpu, has_face)
+            if max_items > 0 and len(cache) > max_items:
+                cache.popitem(last=False)
+
+    embs = torch.stack(embs_cpu, dim=0).to(id_cond.device, dtype=torch.float32)
+    mask = torch.tensor(mask_list, dtype=torch.bool, device=id_cond.device)
+    return embs, mask
 
 
 def main(cfg_path: str):
@@ -436,33 +593,94 @@ def main(cfg_path: str):
     clip_id = cfg["models"]["clip_vision_id"]
     hair_w = cfg["models"]["hair_parsing_weights"]
 
+    insightface_device = str(cfg["models"].get("insightface_device", device)).lower()
+    if insightface_device not in {"cuda", "cpu"}:
+        raise ValueError(f"models.insightface_device must be 'cuda' or 'cpu', got: {insightface_device}")
+    print(f"[init] insightface_device={insightface_device}")
+    id_token_mode = str(cfg["cond"].get("id_token_mode", "deterministic")).strip().lower()
+    id_token_mix = float(cfg["cond"].get("id_token_mix", 0.5))
+
     id_cond = IDArcFaceConditioner(
         n_tokens=n_tokens,
         cross_dim=cross_dim,
-        device=device,
+        device=insightface_device,
         proj_dtype=torch.float32,
-        model_root="/content",
+        model_root=cfg["models"].get("insightface_root"),
+        token_mode=id_token_mode,
+        token_mix=id_token_mix,
     ).to(device)
 
-    hair_cond = HairConditioner(
+    hair_classes = resolve_hair_classes(cfg["cond"])
+    hair_mask_dilate_kernel = int(cfg["cond"].get("hair_mask_dilate_kernel", 3))
+    hair_mask_dilate_iters = int(cfg["cond"].get("hair_mask_dilate_iters", 1))
+    hair_focus_crop = bool(cfg["cond"].get("hair_focus_crop", False))
+    hair_focus_crop_margin = float(cfg["cond"].get("hair_focus_crop_margin", 0.2))
+    hair_focus_crop_square = bool(cfg["cond"].get("hair_focus_crop_square", True))
+    hair_cond = build_hair_conditioner_compat(
         clip_vision_id=clip_id,
         n_tokens=n_tokens,
         cross_dim=cross_dim,
         hair_weights_path=hair_w,
-        hair_class=int(cfg["cond"].get("hair_class", 17)),
+        hair_class=int(hair_classes[0]),
+        hair_classes=hair_classes,
+        hair_mask_dilate_kernel=hair_mask_dilate_kernel,
+        hair_mask_dilate_iters=hair_mask_dilate_iters,
+        hair_focus_crop=hair_focus_crop,
+        hair_focus_crop_margin=hair_focus_crop_margin,
+        hair_focus_crop_square=hair_focus_crop_square,
         device=device,
         clip_dtype=torch.float16,
         proj_dtype=torch.float32,
         bg_value=float(cfg["cond"].get("hair_bg_value", 0.0)),
     ).to(device)
-    print(f"[init] hair_class={hair_cond.enc_h.hair_class}")
+    enc_h = getattr(hair_cond, "enc_h", None)
+    classes_logged = list(getattr(enc_h, "hair_classes", hair_classes))
+    dilate_kernel_logged = getattr(enc_h, "dilate_kernel", hair_mask_dilate_kernel)
+    dilate_iters_logged = getattr(enc_h, "dilate_iters", hair_mask_dilate_iters)
+    focus_enabled_logged = getattr(hair_cond, "hair_focus_crop", hair_focus_crop)
+    focus_margin_logged = getattr(hair_cond, "hair_focus_crop_margin", hair_focus_crop_margin)
+    focus_square_logged = getattr(hair_cond, "hair_focus_crop_square", hair_focus_crop_square)
 
-    # ID-ветка остается замороженной.
+    print(f"[init] hair_classes={classes_logged}")
+    print(
+        "[init] hair_mask_dilate:",
+        f"kernel={dilate_kernel_logged}",
+        f"iters={dilate_iters_logged}",
+    )
+    print(
+        "[init] hair_focus_crop:",
+        f"enabled={focus_enabled_logged}",
+        f"margin={focus_margin_logged}",
+        f"square={focus_square_logged}",
+    )
+    print("[init] use_id_tokens=", bool(cfg["cond"].get("use_id_tokens", False)))
+    print(f"[init] id_token_mode={id_cond.token_mode} id_token_mix={id_cond.token_mix:.3f}")
+
+    # ID embedder остается замороженным; id_proj можно обучать по конфигу.
     id_cond.eval()
     id_cond.requires_grad_(False)
+    use_id_tokens_cfg = bool(cfg["cond"].get("use_id_tokens", False))
+    train_id_proj = bool(cfg["train"].get("train_id_proj", True)) and use_id_tokens_cfg and (
+        id_cond.token_mode in {"projected", "hybrid"}
+    )
+    if train_id_proj:
+        id_cond.proj.requires_grad_(True)
+
+    eval_cfg = cfg.get("eval", {})
+    eval_enabled = bool(eval_cfg.get("enabled", False))
+    eval_every = int(eval_cfg.get("every_steps", 200))
 
     # Data
-    ds = ImageFolderDataset(cfg["data"]["train_dir"], image_size=int(cfg["data"]["image_size"]))
+    data_cfg = cfg["data"]
+    image_size = int(data_cfg["image_size"])
+    train_pairs_csv = data_cfg.get("train_pairs_csv")
+    val_pairs_csv = data_cfg.get("val_pairs_csv")
+    if train_pairs_csv:
+        ds = PairedImageDataset(train_pairs_csv, image_size=image_size)
+        print(f"[data] train paired csv={train_pairs_csv} rows={len(ds)}")
+    else:
+        ds = ImageFolderDataset(data_cfg["train_dir"], image_size=image_size)
+        print(f"[data] train image dir={data_cfg['train_dir']} images={len(ds)}")
     dl = DataLoader(
         ds,
         batch_size=int(cfg["train"]["batch_size"]),
@@ -472,7 +690,36 @@ def main(cfg_path: str):
         collate_fn=collate_keep_pil,
         drop_last=True,
     )
-    sanity_check_tokens(pipe, id_cond, hair_cond, dl, dtype_unet)
+    eval_dl = dl
+    if eval_enabled:
+        if val_pairs_csv:
+            val_ds = PairedImageDataset(val_pairs_csv, image_size=image_size)
+            eval_dl = DataLoader(
+                val_ds,
+                batch_size=int(cfg["train"]["batch_size"]),
+                shuffle=False,
+                num_workers=int(cfg["train"].get("num_workers", 2)),
+                pin_memory=True,
+                collate_fn=collate_keep_pil,
+                drop_last=False,
+            )
+            print(f"[data] val paired csv={val_pairs_csv} rows={len(val_ds)}")
+        elif data_cfg.get("val_dir") and data_cfg.get("val_dir") != data_cfg.get("train_dir"):
+            val_ds = ImageFolderDataset(data_cfg["val_dir"], image_size=image_size)
+            eval_dl = DataLoader(
+                val_ds,
+                batch_size=int(cfg["train"]["batch_size"]),
+                shuffle=False,
+                num_workers=int(cfg["train"].get("num_workers", 2)),
+                pin_memory=True,
+                collate_fn=collate_keep_pil,
+                drop_last=False,
+            )
+            print(f"[data] val image dir={data_cfg['val_dir']} images={len(val_ds)}")
+    if bool(cfg["train"].get("run_sanity_check", True)):
+        sanity_check_tokens(pipe, id_cond, hair_cond, dl, dtype_unet)
+    else:
+        print("[sanity] skipped (train.run_sanity_check=false)")
 
     # Train only hair projection + hair branch inside DualImageAttnProcessor
     hair_cond.requires_grad_(False)
@@ -490,16 +737,29 @@ def main(cfg_path: str):
         if isinstance(proc, DualImageAttnProcessor):
             dual_params += [p for p in proc.parameters() if p.requires_grad]
 
-    train_params = list(hair_cond.proj.parameters()) + dual_params
+    id_proj_params = [p for p in id_cond.proj.parameters() if p.requires_grad]
+    train_params = list(hair_cond.proj.parameters()) + dual_params + id_proj_params
+    id_proj_lr_mult = float(cfg["train"].get("id_proj_lr_mult", 0.5))
+
+    param_groups = [
+        {"params": list(hair_cond.proj.parameters()), "lr": float(cfg["train"]["lr"])},
+    ]
+    if id_proj_params:
+        param_groups.append(
+            {
+                "params": id_proj_params,
+                "lr": float(cfg["train"]["lr"]) * id_proj_lr_mult,
+            }
+        )
+    param_groups.append(
+        {
+            "params": dual_params,
+            "lr": float(cfg["train"]["lr"]) * float(cfg["train"].get("dual_lr_mult", 1.0)),
+        }
+    )
 
     opt = torch.optim.AdamW(
-        [
-            {"params": list(hair_cond.proj.parameters()), "lr": float(cfg["train"]["lr"])},
-            {
-                "params": dual_params,
-                "lr": float(cfg["train"]["lr"]) * float(cfg["train"].get("dual_lr_mult", 1.0)),
-            },
-        ],
+        param_groups,
         weight_decay=float(cfg["train"]["weight_decay"]),
     )
 
@@ -507,12 +767,17 @@ def main(cfg_path: str):
         return sum(p.numel() for p in m.parameters() if p.requires_grad)
 
     print("trainable id_cond:", count_trainable(id_cond))
+    print("trainable id_proj:", count_trainable(id_cond.proj))
     print("trainable hair_cond:", count_trainable(hair_cond))
     print("trainable hair_proj:", count_trainable(hair_cond.proj))
     print(
         "lr hair_proj=", float(cfg["train"]["lr"]),
+        "lr id_proj=",
+        (float(cfg["train"]["lr"]) * id_proj_lr_mult) if id_proj_params else 0.0,
         "lr dual=",
         float(cfg["train"]["lr"]) * float(cfg["train"].get("dual_lr_mult", 1.0)),
+        "train_id_proj=",
+        bool(id_proj_params),
         "hair_aux_weight=",
         float(cfg["train"].get("hair_aux_weight", 0.0)),
         "cross_hair_clip_weight=",
@@ -532,18 +797,18 @@ def main(cfg_path: str):
     scaler = torch.amp.GradScaler("cuda", enabled=True)
 
     fixed_batch = None
-    if cfg.get("eval", {}).get("enabled", False):
-        fixed_batch = next(iter(dl))
+    if eval_enabled:
+        fixed_batch = next(iter(eval_dl))
 
     scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
     eval_scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
 
     # Optional sanity compare (text-only standard)
-    if cfg.get("eval", {}).get("sanity_compare", False):
+    if eval_cfg.get("sanity_compare", False):
         pipe.scheduler = eval_scheduler
-        prompt_s = cfg.get("eval", {}).get("prompt", "a portrait photo of a person")
-        steps_s = int(cfg["eval"].get("num_inference_steps", 30))
-        seed_s = int(cfg["eval"].get("seed", 123))
+        prompt_s = eval_cfg.get("prompt", "a portrait photo of a person")
+        steps_s = int(eval_cfg.get("num_inference_steps", 30))
+        seed_s = int(eval_cfg.get("seed", 123))
 
         tok = pipe.tokenizer([prompt_s], padding="max_length",
                              max_length=pipe.tokenizer.model_max_length,
@@ -573,6 +838,53 @@ def main(cfg_path: str):
     max_steps = int(cfg["train"]["max_steps"])
     log_every = int(cfg["train"]["log_every"])
     save_every = int(cfg["train"]["save_every"])
+    cache_arcface_embs = bool(cfg["train"].get("cache_arcface_embs", False))
+    disable_arcface_runtime = bool(cfg["train"].get("disable_arcface_runtime", False))
+    arcface_cache_max_items = int(cfg["train"].get("arcface_cache_max_items", 50000))
+    arcface_cache = OrderedDict()
+    arcface_cache_stats = {"hit": 0, "miss": 0}
+    profile_timing = bool(cfg["train"].get("profile_timing", False))
+    profile_sync_cuda = bool(cfg["train"].get("profile_sync_cuda", False))
+    profile_every = int(cfg["train"].get("profile_every", log_every))
+    use_id_tokens = bool(cfg["cond"].get("use_id_tokens", False))
+    only_both_face = bool(cfg["train"].get("only_both_face", False))
+    timing_acc = defaultdict(float)
+    timing_steps = 0
+    face_filter_stats = {"kept": 0, "dropped": 0, "skipped_batches": 0}
+    print(
+        "arcface_cache=",
+        cache_arcface_embs,
+        "arcface_cache_max_items=",
+        arcface_cache_max_items,
+        "disable_arcface_runtime=",
+        disable_arcface_runtime,
+    )
+    print("only_both_face=", only_both_face)
+    if only_both_face and disable_arcface_runtime:
+        raise ValueError("train.only_both_face=true requires disable_arcface_runtime=false")
+    print(
+        "[eval]",
+        f"enabled={eval_enabled}",
+        f"every_steps={eval_every}",
+        f"samples_dir={run_dir / 'samples'}",
+        f"hair_debug={bool(eval_cfg.get('debug_hair_masks', True))}",
+    )
+
+    def _sync_if_needed():
+        if profile_timing and profile_sync_cuda and device == "cuda":
+            torch.cuda.synchronize()
+
+    def _t_start():
+        if not profile_timing:
+            return None
+        _sync_if_needed()
+        return time.perf_counter()
+
+    def _t_stop(key: str, t0):
+        if not profile_timing or t0 is None:
+            return
+        _sync_if_needed()
+        timing_acc[key] += time.perf_counter() - t0
 
     # Modes
     unet.train()
@@ -583,30 +895,30 @@ def main(cfg_path: str):
     it = iter(dl)
 
     while step < max_steps:
+        t_step_total = _t_start()
+
+        t0 = _t_start()
         try:
             batch = next(it)
         except StopIteration:
             it = iter(dl)
             batch = next(it)
+        _t_stop("dataloader", t0)
 
+        t0 = _t_start()
         pixel_values = batch["pixel_values"].to(device=device, dtype=dtype_unet)  # [-1,1], fp16
-        pil_images = batch["pil"]  # list[PIL]
+        pil_images = batch.get("id_pil", batch["pil"])  # identity/target images
+        hair_pil_images = batch.get("hair_pil", batch["pil"])  # hair-condition images
+        image_paths = batch.get("id_path", batch.get("path", None))
+        hair_paths = batch.get("hair_path", None)
         B = pixel_values.shape[0]
+        _t_stop("host_to_device", t0)
 
         # ---- Arc2Face text embedding ----
+        t0 = _t_start()
+        face_embs_512 = None
         with torch.no_grad():
-            face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_images, return_mask=True)  # (B,512), (B,)
-            text_emb = project_face_embs(pipe, face_embs_512).to(dtype_unet)  # (B,T,H)
-            text_emb_empty = project_face_embs(pipe, torch.zeros_like(face_embs_512)).to(dtype_unet)
-
-            if text_emb.shape[0] != B:
-                if text_emb.shape[0] == 1:
-                    text_emb = text_emb.repeat(B, 1, 1)
-                else:
-                    raise RuntimeError(f"text_emb batch mismatch: got {text_emb.shape[0]} vs B={B}")
-
-            # fallback: если лица нет — подставим обычный текст только для этих элементов
-            if (~face_mask).any():
+            if disable_arcface_runtime:
                 prompt_fb = cfg.get("train", {}).get("prompt", "a portrait photo of a person")
                 tok_fb = pipe.tokenizer(
                     [prompt_fb] * B,
@@ -614,11 +926,75 @@ def main(cfg_path: str):
                     max_length=pipe.tokenizer.model_max_length,
                     return_tensors="pt",
                 ).to(device)
-                text_fb = pipe.text_encoder(**tok_fb).last_hidden_state.to(dtype_unet)
-                text_emb = text_emb.clone()
-                text_emb[~face_mask] = text_fb[~face_mask]
+                text_emb = pipe.text_encoder(**tok_fb).last_hidden_state.to(dtype_unet)
+                tok_empty = pipe.tokenizer(
+                    [""] * B,
+                    padding="max_length",
+                    max_length=pipe.tokenizer.model_max_length,
+                    return_tensors="pt",
+                ).to(device)
+                text_emb_empty = pipe.text_encoder(**tok_empty).last_hidden_state.to(dtype_unet)
+            else:
+                face_embs_512, face_mask = extract_arcface_embs_cached(
+                    id_cond=id_cond,
+                    pil_images=pil_images,
+                    image_paths=image_paths,
+                    cache=arcface_cache,
+                    max_items=arcface_cache_max_items,
+                    use_cache=cache_arcface_embs,
+                    stats=arcface_cache_stats,
+                )  # (B,512), (B,)
+                text_emb = project_face_embs(pipe, face_embs_512).to(dtype_unet)  # (B,T,H)
+                text_emb_empty = project_face_embs(pipe, torch.zeros_like(face_embs_512)).to(dtype_unet)
+
+                if text_emb.shape[0] != B:
+                    if text_emb.shape[0] == 1:
+                        text_emb = text_emb.repeat(B, 1, 1)
+                    else:
+                        raise RuntimeError(f"text_emb batch mismatch: got {text_emb.shape[0]} vs B={B}")
+
+                # fallback: если лица нет — подставим обычный текст только для этих элементов
+                if (~face_mask).any():
+                    prompt_fb = cfg.get("train", {}).get("prompt", "a portrait photo of a person")
+                    tok_fb = pipe.tokenizer(
+                        [prompt_fb] * B,
+                        padding="max_length",
+                        max_length=pipe.tokenizer.model_max_length,
+                        return_tensors="pt",
+                    ).to(device)
+                    text_fb = pipe.text_encoder(**tok_fb).last_hidden_state.to(dtype_unet)
+                    text_emb = text_emb.clone()
+                    text_emb[~face_mask] = text_fb[~face_mask]
+        _t_stop("id_text_embed", t0)
+
+        # Strict face-only training mode: keep only samples with detected face.
+        if only_both_face:
+            keep = face_mask
+            keep_idx = keep.nonzero(as_tuple=False).squeeze(1)
+            n_keep = int(keep_idx.numel())
+            face_filter_stats["kept"] += n_keep
+            face_filter_stats["dropped"] += int(B - n_keep)
+            if n_keep == 0:
+                face_filter_stats["skipped_batches"] += 1
+                if step % log_every == 0:
+                    print(f"[step {step}/{max_steps}] skip batch: no face-detected samples")
+                continue
+            if n_keep < B:
+                pixel_values = pixel_values[keep_idx]
+                pil_images = [pil_images[i] for i in keep_idx.tolist()]
+                hair_pil_images = [hair_pil_images[i] for i in keep_idx.tolist()]
+                if image_paths is not None:
+                    image_paths = [image_paths[i] for i in keep_idx.tolist()]
+                if hair_paths is not None:
+                    hair_paths = [hair_paths[i] for i in keep_idx.tolist()]
+                face_embs_512 = face_embs_512[keep_idx]
+                face_mask = face_mask[keep_idx]
+                text_emb = text_emb[keep_idx]
+                text_emb_empty = text_emb_empty[keep_idx]
+                B = n_keep
 
         # VAE encode -> latents
+        t0 = _t_start()
         with torch.no_grad():
             latents = pipe.vae.encode(pixel_values).latent_dist.sample()
             latents = latents * pipe.vae.config.scaling_factor  # [B,4,h,w]
@@ -627,20 +1003,23 @@ def main(cfg_path: str):
         noise = torch.randn_like(latents)
         t = torch.randint(0, scheduler.config.num_train_timesteps, (B,), device=device).long()
         noisy = scheduler.add_noise(latents, noise, t).to(dtype=dtype_unet)
+        _t_stop("vae_noise", t0)
 
         # Hair tokens
-        hair_tokens = hair_cond(pil_images, out_dtype=dtype_unet)  # [B, n_tokens, cross_dim]
+        t0 = _t_start()
+        hair_tokens = hair_cond(hair_pil_images, out_dtype=dtype_unet)  # [B, n_tokens, cross_dim]
         hair_tokens = hair_tokens / (hair_tokens.norm(dim=-1, keepdim=True) + 1e-6)
-        id_tokens = torch.zeros_like(hair_tokens)
-        # cross-hair: use the most dissimilar hair source from current batch
-        flat = hair_tokens.detach().float().reshape(B, -1)
-        flat = flat / (flat.norm(dim=-1, keepdim=True) + 1e-8)
-        sim = flat @ flat.t()
-        sim.fill_diagonal_(2.0)
-        src_idx = sim.argmin(dim=1)
-        hair_tokens_cross = hair_tokens[src_idx]
+        if use_id_tokens and (face_embs_512 is not None):
+            id_tokens = id_cond.embs_to_tokens(face_embs_512, out_dtype=dtype_unet)
+            id_tokens = id_tokens / (id_tokens.norm(dim=-1, keepdim=True) + 1e-6)
+        else:
+            id_tokens = torch.zeros_like(hair_tokens)
+        src_idx = None
+        hair_tokens_cross = None
+        _t_stop("hair_tokens", t0)
         
         # Сборка conditioning
+        t0 = _t_start()
         enc = {"text": text_emb, "id": id_tokens, "hair": hair_tokens}
         enc_hair_only = {"text": text_emb_empty, "id": id_tokens, "hair": hair_tokens}
         hair_aux_weight = float(cfg["train"].get("hair_aux_weight", 0.0))
@@ -650,6 +1029,7 @@ def main(cfg_path: str):
         cross_hair_clip_every = int(cfg["train"].get("cross_hair_clip_every", 1))
         cross_hair_clip_batch = int(cfg["train"].get("cross_hair_clip_batch", 2))
         cross_hair_decode_size = int(cfg["train"].get("cross_hair_decode_size", 256))
+        cross_min_hair_coverage = float(cfg["train"].get("cross_min_hair_coverage", 0.02))
         need_cross_clip = (
             ((cross_hair_clip_weight > 0.0) or (cross_hair_contrast_weight > 0.0))
             and (B >= 2)
@@ -666,6 +1046,14 @@ def main(cfg_path: str):
                 else:
                     cross_idx = torch.arange(B, device=device)
 
+                hair_masks_all = hair_cond.get_hair_masks(hair_pil_images).detach()    # [B,512,512]
+                src_idx = select_cross_source_indices(
+                    hair_tokens=hair_tokens,
+                    hair_masks=hair_masks_all,
+                    min_hair_coverage=cross_min_hair_coverage,
+                )
+                hair_tokens_cross = hair_tokens[src_idx]
+
                 noisy_cross = noisy[cross_idx]
                 t_cross = t[cross_idx]
                 enc_cross = {
@@ -674,19 +1062,20 @@ def main(cfg_path: str):
                     "hair": hair_tokens_cross[cross_idx],
                 }
 
-                ref_pooled_all = hair_cond._pooled_hair(pil_images).detach().float()  # [B, D]
+                ref_pooled_all = hair_cond._pooled_hair(hair_pil_images).detach().float()  # [B, D]
                 # positive target: source-B hair embedding
                 ref_pooled_pos = ref_pooled_all[src_idx][cross_idx]                    # [Bc, D]
                 ref_pooled_pos = ref_pooled_pos / (ref_pooled_pos.norm(dim=-1, keepdim=True) + 1e-6)
                 # negative target: original source-A hair embedding
-                ref_pooled_neg = ref_pooled_all[cross_idx]                             # [Bc, D]
+                ref_pooled_neg = hair_cond._pooled_hair(pil_images).detach().float()[cross_idx]  # [Bc, D]
                 ref_pooled_neg = ref_pooled_neg / (ref_pooled_neg.norm(dim=-1, keepdim=True) + 1e-6)
-                hair_masks = hair_cond.get_hair_masks(pil_images).detach()            # [B,512,512]
-                hair_masks = hair_masks[src_idx][cross_idx].unsqueeze(1).to(device=device, dtype=torch.float32)
+                hair_masks = hair_masks_all[src_idx][cross_idx].unsqueeze(1).to(device=device, dtype=torch.float32)
+        _t_stop("cross_prep", t0)
 
         # Train step (predict noise)
         opt.zero_grad(set_to_none=True)
 
+        t0 = _t_start()
         with torch.amp.autocast("cuda", dtype=torch.float16):
             noise_pred = pipe.unet(noisy, t, encoder_hidden_states=enc).sample
             loss_main = F.mse_loss(noise_pred.float(), noise.float())
@@ -702,7 +1091,9 @@ def main(cfg_path: str):
                 noise_pred_cross = pipe.unet(noisy_cross, t_cross, encoder_hidden_states=enc_cross).sample
             else:
                 noise_pred_cross = None
+        _t_stop("unet_forward", t0)
 
+        t0 = _t_start()
         if need_cross_clip:
             # Predict x0 from eps-prediction and compute CLIP similarity on hair-masked generated image.
             b_cross = noisy_cross.shape[0]
@@ -744,16 +1135,19 @@ def main(cfg_path: str):
         else:
             loss_cross_clip = torch.zeros((), device=device, dtype=loss_main.dtype)
             loss_cross_contrast = torch.zeros((), device=device, dtype=loss_main.dtype)
+        _t_stop("cross_loss", t0)
 
         if not torch.isfinite(loss):
             print(f"[step {step}] loss non-finite -> skipping")
             continue
 
+        t0 = _t_start()
         scaler.scale(loss).backward()
         scaler.unscale_(opt)
         torch.nn.utils.clip_grad_norm_(train_params, float(cfg["train"].get("grad_clip", 1.0)))
         scaler.step(opt)
         scaler.update()
+        _t_stop("backward_opt", t0)
 
         if step % log_every == 0:
             print(
@@ -761,18 +1155,47 @@ def main(cfg_path: str):
                 f"(main={loss_main.item():.6f}, hair_aux={loss_hair.item():.6f}, "
                 f"cross_clip={loss_cross_clip.item():.6f}, cross_ctr={loss_cross_contrast.item():.6f})"
             )
+            if only_both_face:
+                print(
+                    "[face_filter] kept_total=",
+                    face_filter_stats["kept"],
+                    "dropped_total=",
+                    face_filter_stats["dropped"],
+                    "skipped_batches=",
+                    face_filter_stats["skipped_batches"],
+                )
+            if cache_arcface_embs:
+                req = arcface_cache_stats["hit"] + arcface_cache_stats["miss"]
+                if req > 0:
+                    hit_rate = 100.0 * arcface_cache_stats["hit"] / req
+                    print(
+                        f"[arcface_cache] size={len(arcface_cache)} "
+                        f"hit={arcface_cache_stats['hit']} miss={arcface_cache_stats['miss']} "
+                        f"hit_rate={hit_rate:.1f}%"
+                    )
 
         # Qualitative sampling
-        if cfg.get("eval", {}).get("enabled", False):
-            every = int(cfg["eval"].get("every_steps", 200))
-            if step % every == 0:
+        if eval_enabled:
+            if step % eval_every == 0:
+                t0 = _t_start()
                 qb = fixed_batch if fixed_batch is not None else batch
                 q_pixel = qb["pixel_values"].to(device=device, dtype=dtype_unet)
-                q_pil = qb["pil"]
+                q_pil = qb.get("id_pil", qb["pil"])
+                q_hair_pil = qb.get("hair_pil", qb["pil"])
+                q_paths = qb.get("id_path", qb.get("path", None))
+                q_hair_paths = qb.get("hair_path", None)
                 qB = q_pixel.shape[0]
 
                 with torch.no_grad():
-                    q_face_embs_512, q_face_mask = id_cond.extract_arcface_embs(q_pil, return_mask=True)
+                    q_face_embs_512, q_face_mask = extract_arcface_embs_cached(
+                        id_cond=id_cond,
+                        pil_images=q_pil,
+                        image_paths=q_paths,
+                        cache=arcface_cache,
+                        max_items=arcface_cache_max_items,
+                        use_cache=cache_arcface_embs,
+                        stats=arcface_cache_stats,
+                    )
                     q_text_emb = project_face_embs(pipe, q_face_embs_512).to(dtype_unet)
 
                     if q_text_emb.shape[0] != qB:
@@ -782,7 +1205,7 @@ def main(cfg_path: str):
                             raise RuntimeError(f"q_text_emb batch mismatch: got {q_text_emb.shape[0]} vs qB={qB}")
 
                     if (~q_face_mask).any():
-                        eval_prompt = cfg.get("eval", {}).get("prompt", "a portrait photo of a person")
+                        eval_prompt = eval_cfg.get("prompt", "a portrait photo of a person")
                         q_tok_fb = pipe.tokenizer(
                             [eval_prompt] * qB,
                             padding="max_length",
@@ -792,6 +1215,26 @@ def main(cfg_path: str):
                         q_text_fb = pipe.text_encoder(**q_tok_fb).last_hidden_state.to(dtype_unet)
                         q_text_emb = q_text_emb.clone()
                         q_text_emb[~q_face_mask] = q_text_fb[~q_face_mask]
+
+                    if only_both_face:
+                        q_keep_idx = q_face_mask.nonzero(as_tuple=False).squeeze(1)
+                        q_keep = int(q_keep_idx.numel())
+                        if q_keep == 0:
+                            print("[eval] skip qualitative_check: no face-detected samples in eval batch")
+                            _t_stop("eval_sample", t0)
+                            continue
+                        if q_keep < qB:
+                            q_pixel = q_pixel[q_keep_idx]
+                            q_pil = [q_pil[i] for i in q_keep_idx.tolist()]
+                            q_hair_pil = [q_hair_pil[i] for i in q_keep_idx.tolist()]
+                            if q_paths is not None:
+                                q_paths = [q_paths[i] for i in q_keep_idx.tolist()]
+                            if q_hair_paths is not None:
+                                q_hair_paths = [q_hair_paths[i] for i in q_keep_idx.tolist()]
+                            q_face_embs_512 = q_face_embs_512[q_keep_idx]
+                            q_face_mask = q_face_mask[q_keep_idx]
+                            q_text_emb = q_text_emb[q_keep_idx]
+                            qB = int(q_pixel.shape[0])
 
                 # switch to eval for sampling
                 was_unet_train = unet.training
@@ -808,13 +1251,16 @@ def main(cfg_path: str):
                     scheduler=eval_scheduler,
                     pixel_values=q_pixel,
                     pil_images=q_pil,
+                    hair_pil_images=q_hair_pil,
                     text_emb=q_text_emb,
                     id_cond=id_cond,
                     hair_cond=hair_cond,
                     dtype_unet=dtype_unet,
-                    num_steps=int(cfg["eval"].get("num_inference_steps", 50)),
-                    seed=int(cfg["eval"].get("seed", 123)),
-                    save_hair_debug=bool(cfg["eval"].get("debug_hair_masks", True)),
+                    num_steps=int(eval_cfg.get("num_inference_steps", 50)),
+                    seed=int(eval_cfg.get("seed", 123)),
+                    save_hair_debug=bool(eval_cfg.get("debug_hair_masks", True)),
+                    cross_min_hair_coverage=float(cfg["train"].get("cross_min_hair_coverage", 0.02)),
+                    use_id_tokens=use_id_tokens,
                 )
 
                 # restore modes
@@ -824,9 +1270,11 @@ def main(cfg_path: str):
                     id_cond.train()
                 if was_hair_train:
                     hair_cond.train()
+                _t_stop("eval_sample", t0)
 
         # Save checkpoint
-        if step % save_every == 0 or step == max_steps:
+        if step % save_every == 0 or (step + 1) == max_steps:
+            t0 = _t_start()
             ckpt = {
                 "step": step,
                 "id_proj": id_cond.proj.state_dict(),
@@ -842,6 +1290,22 @@ def main(cfg_path: str):
             out = run_dir / f"ckpt_step{step}.pt"
             torch.save(ckpt, out)
             print("Saved:", out)
+            _t_stop("checkpoint_save", t0)
+
+        _t_stop("step_total", t_step_total)
+        if profile_timing:
+            timing_steps += 1
+            if step % max(1, profile_every) == 0:
+                total = sum(timing_acc.values())
+                if total > 0 and timing_steps > 0:
+                    ordered = sorted(timing_acc.items(), key=lambda kv: kv[1], reverse=True)
+                    parts = [
+                        f"{k}={v/timing_steps:.3f}s ({100.0*v/total:.1f}%)"
+                        for k, v in ordered
+                    ]
+                    print(f"[timing avg/{timing_steps} steps] " + " | ".join(parts))
+                timing_acc.clear()
+                timing_steps = 0
 
         step += 1
 

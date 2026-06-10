@@ -15,6 +15,9 @@ eval:
 data:
   train_dir: /content/datasets/ffhq_sub/train
   val_dir: /content/datasets/ffhq_sub/val
+  # Optional identity-disjoint paired protocol.
+  train_pairs_csv: null
+  val_pairs_csv: null
   image_size: 512
 
 models:

@@ -75,6 +75,45 @@ pip install -r requirements.txt
 
 Датасет читается через `ImageFolderDataset` (`src/data/images.py`).
 
+### Честный identity-disjoint paired protocol
+
+Для проверки переноса волос лучше не делить картинки случайно: один и тот же человек
+может встретиться на нескольких фото и попасть одновременно в train и validation.
+Для этого есть протокол на ArcFace-кластерах:
+
+```bash
+python scripts/build_identity_splits.py \
+  --image-root /path/to/FFHQ_clean_nohat_nohairmiss \
+  --out-dir data/ffhq_identity_split \
+  --insightface-root /path/to/insightface_root \
+  --device cuda \
+  --eps 0.5 \
+  --min-samples 4 \
+  --min-cluster-size 2 \
+  --val-frac 0.1
+```
+
+Скрипт сохраняет:
+- `identity_manifest.csv` — путь, ArcFace/DBSCAN cluster id, split
+- `train_pairs.csv` — пары для обучения
+- `val_pairs.csv` — пары для validation
+- `split_summary.json` — сводка по кластерам и split
+
+В paired CSV:
+- `target` / `ref_id` — картинка target и identity condition
+- `ref_hair` — другая картинка для hair condition
+- `target_cluster` и `hair_cluster` различаются, чтобы hair condition не был тем же identity
+
+Чтобы включить этот режим:
+
+```yaml
+data:
+  train_pairs_csv: data/ffhq_identity_split/train_pairs.csv
+  val_pairs_csv: data/ffhq_identity_split/val_pairs.csv
+```
+
+Если `train_pairs_csv` не задан, сохраняется старый режим чтения из `data.train_dir`.
+
 ## Обучение
 
 ```bash

@@ -14,6 +14,9 @@ eval:
 data:
   train_dir: /home/arobryadchikova/datasets/FFHQ_clean_nohat_nohairmiss
   val_dir: /home/arobryadchikova/datasets/FFHQ_clean_nohat_nohairmiss
+  # Optional identity-disjoint paired protocol.
+  train_pairs_csv: null
+  val_pairs_csv: null
   image_size: 512
 
 models:

@@ -1,0 +1,17 @@
+# Install torch/torchvision separately for your cluster CUDA stack.
+# Pinned to known-good training stack (matches the Colab setup used in this project).
+diffusers==0.29.2
+transformers==4.36.0
+accelerate==0.25.0
+safetensors
+einops
+opencv-python-headless
+tqdm
+pyyaml
+scikit-image
+insightface==0.7.3
+onnxruntime-gpu==1.16.3
+pandas
+scipy
+scikit-learn
+Pillow

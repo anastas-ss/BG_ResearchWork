@@ -15,6 +15,9 @@ data:
   train_dir: /home/arobryadchikova/datasets/FFHQ_clean_nohat_nohairmiss
   # Keep val on the same cleaned pool unless/until a separate split is prepared.
   val_dir: /home/arobryadchikova/datasets/FFHQ_clean_nohat_nohairmiss
+  # Optional identity-disjoint paired protocol.
+  train_pairs_csv: null
+  val_pairs_csv: null
   image_size: 512
 
 models:

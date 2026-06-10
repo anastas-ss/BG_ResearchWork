@@ -5,7 +5,20 @@ __pycache__/
 
 runs/
 outputs/
+logs/
 *.log
+*.out
+*.err
+
+cluster_results*/
+cluster_results_download/
+report_data_ckpt_compare.tar.gz
+*.tar.gz
+*.zip
+
+reports/noid_*/
+reports/*_bundle/
+reports/*_training_dynamics/
 
 .cache/
 **/.cache/
@@ -13,7 +26,9 @@ huggingface/
 **/huggingface/
 
 *.pt
+*.pth
 *.ckpt
 *.safetensors
+*.onnx
 
 .env
