@@ -1,14 +1,15 @@
 # train.py
 # - Stable Diffusion (frozen backbone)
 # - DualImageAttnProcessor injected into ALL cross-attn (attn2) blocks
-# - Two external condition streams: ID (ArcFace tokens) and Hair (Parsing + CLIP)
-# - Text stream ("text") is Arc2Face-style: ArcFace(512) is injected into the CLIP text prompt token "id"
-# - Qualitative samples saved as 4-up grid: both_on / id_only / hair_only / both_off
+# - External condition stream: Hair (Parsing + CLIP)
+# - Identity is provided only through the Arc2Face text stream:
+#   ArcFace(512) is injected into the CLIP text prompt token "id"
+# - Qualitative samples compare hair_on / hair_off / empty_text variants
 #
 # Expected repo structure:
 #   src/data/images.py                      -> ImageFolderDataset (returns pixel_values, pil, path)
 #   src/model/dual_ip_attention.py          -> DualImageAttnProcessor
-#   src/model/id_conditioner_insightface.py -> IDArcFaceConditioner (with extract_arcface_embs)
+#   src/model/id_conditioner_insightface.py -> IDArcFaceConditioner (ArcFace extractor for Arc2Face text)
 #   src/model/hair_conditioner_parsing.py   -> HairConditioner
 #   src/utils/repro.py                      -> set_seed
 #   src/utils/project_face_embs.py          -> project_face_embs (ArcFace->CLIP prompt embeds)
@@ -67,18 +68,16 @@ def collate_keep_pil(batch_list):
 def sanity_check_tokens(pipe, id_cond, hair_cond, dl, dtype_unet, n_samples=4):
     """
     Проверяем, что:
-    1) ID токены ненулевые и frozen
+    1) ArcFace extractor видит лица для Arc2Face text stream
     2) Hair токены ненулевые и trainable
-    3) Выводим mean и norm для проверки
+    3) Отдельной ID-token ветки больше нет
     """
     batch = next(iter(dl))
     pil_images = batch.get("id_pil", batch["pil"])[:n_samples]
     hair_images = batch.get("hair_pil", batch["pil"])[:n_samples]
     B = len(pil_images)
 
-    # ID tokens
     face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_images, return_mask=True)
-    id_tokens = id_cond.embs_to_tokens(face_embs_512, out_dtype=dtype_unet)
 
     # Hair tokens
     hair_tokens = hair_cond(hair_images, out_dtype=dtype_unet)
@@ -86,13 +85,13 @@ def sanity_check_tokens(pipe, id_cond, hair_cond, dl, dtype_unet, n_samples=4):
 
     print("\n=== Sanity Check Tokens ===")
     print(f"face_mask: {face_mask.tolist()}")
-    print(f"ID tokens mean abs: {id_tokens.abs().mean().item():.4f}, norm mean: {id_tokens.norm(dim=-1).mean().item():.4f}")
+    print(f"ArcFace emb mean abs: {face_embs_512.abs().mean().item():.4f}, norm mean: {face_embs_512.norm(dim=-1).mean().item():.4f}")
     print(f"Hair tokens mean abs: {hair_tokens.abs().mean().item():.4f}, norm mean: {hair_tokens.norm(dim=-1).mean().item():.4f}")
 
     # Проверка заморозки
     id_grad = any(p.requires_grad for p in id_cond.parameters())
     hair_grad = any(p.requires_grad for p in hair_cond.parameters())
-    print(f"ID conditioner trainable? {id_grad} (должно быть False)")
+    print(f"ArcFace extractor trainable? {id_grad} (должно быть False)")
     print(f"Hair conditioner trainable? {hair_grad} (должно быть True)")
 
     # Пример: нулевые ID для отсутствующих лиц
@@ -260,11 +259,10 @@ def qualitative_check(
     seed: int,
     save_hair_debug: bool = True,
     cross_min_hair_coverage: float = 0.02,
-    use_id_tokens: bool = False,
 ):
     """
     Saves: runs/<exp>/samples/step_XXXXXXX.png
-    Row: [orig | both_on | id_only | hair_only | both_off | cross_hair(optional) | hair_source_B(optional) | hair_source_B_masked(optional)]
+    Row: [orig | hair_on | hair_off | empty_text_hair | empty_text_off | cross_hair(optional) | hair_source_B(optional) | hair_source_B_masked(optional)]
     """
     out_dir = run_dir / "samples"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -287,28 +285,20 @@ def qualitative_check(
             hair_cond=hair_cond,
         )
 
-    # Arc2Face text stream is always present.
-    # Additional id_tokens branch is optional (controlled by use_id_tokens).
-    # For "id=0" ablations we feed an explicit empty Arc2Face embedding, not plain text.
+    # Arc2Face text stream is always present. For empty-text ablations we feed
+    # an explicit empty ArcFace embedding, not plain text.
     with torch.no_grad():
         face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_images, return_mask=True)
         text_emb_empty = project_face_embs(pipe, torch.zeros_like(face_embs_512)).to(dtype_unet)
-    if use_id_tokens:
-        id_tokens = id_cond.embs_to_tokens(face_embs_512, out_dtype=dtype_unet)
-        id_tokens = id_tokens / (id_tokens.norm(dim=-1, keepdim=True) + 1e-6)
-    else:
-        id_tokens = torch.zeros_like(hair_tokens)
     
     print("has_face:", face_mask.tolist())
 
     print(
         f"[qual diag] mean|text|={text_emb.detach().float().abs().mean().item():.4f}  "
-        f"mean|id|={id_tokens.detach().float().abs().mean().item():.4f}  "
         f"mean|hair|={hair_tokens.detach().float().abs().mean().item():.4f}"
     )
     print(
         f"[qual diag] mean_norm text={text_emb.detach().float().norm(dim=-1).mean().item():.4f}  "
-        f"id={id_tokens.detach().float().norm(dim=-1).mean().item():.4f}  "
         f"hair={hair_tokens.detach().float().norm(dim=-1).mean().item():.4f}"
     )
 
@@ -334,10 +324,10 @@ def qualitative_check(
         text_emb_uc = pipe.text_encoder(**tok_uc).last_hidden_state.to(dtype_unet)
 
     variants = [
-        ("both_on",   text_emb,       id_tokens,                   hair_tokens,                   3.0),
-        ("id_only",   text_emb,       id_tokens,                   torch.zeros_like(hair_tokens), 3.0),
-        ("hair_only", text_emb_empty, id_tokens,                   hair_tokens,                   3.0),
-        ("both_off",  text_emb_empty, id_tokens,                   torch.zeros_like(hair_tokens), 3.0),
+        ("hair_on",         text_emb,       hair_tokens,                   3.0),
+        ("hair_off",        text_emb,       torch.zeros_like(hair_tokens), 3.0),
+        ("empty_text_hair", text_emb_empty, hair_tokens,                   3.0),
+        ("empty_text_off",  text_emb_empty, torch.zeros_like(hair_tokens), 3.0),
     ]
     cross_src_idx0 = None
     src_img_b = None
@@ -354,13 +344,13 @@ def qualitative_check(
         src_img_b = TVF.to_tensor(pil_b).unsqueeze(0).to(device=pixel_values.device, dtype=torch.float32)
         pil_b_masked = apply_mask_to_pil(pil_b, hair_masks[cross_src_idx0], bg=hair_cond.bg_value)
         src_img_b_masked = TVF.to_tensor(pil_b_masked).unsqueeze(0)
-        variants.append(("cross_hair", text_emb, id_tokens, hair_tokens_cross, 3.0))
+        variants.append(("cross_hair", text_emb, hair_tokens_cross, 3.0))
 
     rows = []
     row_by_tag = {}
-    for tag, txt_t, id_t, hair_t, cfg_s in variants:
-        enc_cond   = {"text": txt_t, "id": id_t, "hair": hair_t}
-        enc_uncond = {"text": text_emb_uc, "id": torch.zeros_like(id_t), "hair": torch.zeros_like(hair_t)}
+    for tag, txt_t, hair_t, cfg_s in variants:
+        enc_cond   = {"text": txt_t, "hair": hair_t}
+        enc_uncond = {"text": text_emb_uc, "hair": torch.zeros_like(hair_t)}
 
         lat = sample_with_cfg(
             pipe=pipe,
@@ -377,15 +367,15 @@ def qualitative_check(
         row_by_tag[tag] = img_01[:1]
 
     # Numeric diagnostics: if these stay ~0 over training, branch effect is weak.
-    if "both_on" in row_by_tag and "id_only" in row_by_tag:
-        l2_bi, cos_bi = _img_pair_metrics(row_by_tag["both_on"], row_by_tag["id_only"])
-        print(f"[qual diff] both_on vs id_only: l2={l2_bi:.6f}, cos={cos_bi:.6f}")
-    if "hair_only" in row_by_tag and "both_off" in row_by_tag:
-        l2_hb, cos_hb = _img_pair_metrics(row_by_tag["hair_only"], row_by_tag["both_off"])
-        print(f"[qual diff] hair_only vs both_off: l2={l2_hb:.6f}, cos={cos_hb:.6f}")
-    if "cross_hair" in row_by_tag and "both_on" in row_by_tag:
-        l2_ch, cos_ch = _img_pair_metrics(row_by_tag["cross_hair"], row_by_tag["both_on"])
-        print(f"[qual diff] cross_hair vs both_on: l2={l2_ch:.6f}, cos={cos_ch:.6f} src_idx0={cross_src_idx0}")
+    if "hair_on" in row_by_tag and "hair_off" in row_by_tag:
+        l2_bi, cos_bi = _img_pair_metrics(row_by_tag["hair_on"], row_by_tag["hair_off"])
+        print(f"[qual diff] hair_on vs hair_off: l2={l2_bi:.6f}, cos={cos_bi:.6f}")
+    if "empty_text_hair" in row_by_tag and "empty_text_off" in row_by_tag:
+        l2_hb, cos_hb = _img_pair_metrics(row_by_tag["empty_text_hair"], row_by_tag["empty_text_off"])
+        print(f"[qual diff] empty_text_hair vs empty_text_off: l2={l2_hb:.6f}, cos={cos_hb:.6f}")
+    if "cross_hair" in row_by_tag and "hair_on" in row_by_tag:
+        l2_ch, cos_ch = _img_pair_metrics(row_by_tag["cross_hair"], row_by_tag["hair_on"])
+        print(f"[qual diff] cross_hair vs hair_on: l2={l2_ch:.6f}, cos={cos_ch:.6f} src_idx0={cross_src_idx0}")
 
     orig_01 = (pixel_values[:1].float() * 0.5 + 0.5).clamp(0, 1)
     row_items = [orig_01] + rows
@@ -565,15 +555,9 @@ def main(cfg_path: str):
                 base_processor=base_proc,
                 hidden_size=hidden_size,
                 cross_attention_dim=cross_dim,
-                scale_id=float(cfg["cond"]["scale_id"]),
                 scale_hair=float(cfg["cond"]["scale_hair"]),
                 attn_fp32=True,
             ).to(device=device, dtype=torch.float32)  # keep this module stable in fp32
-
-            # Frozen ID branch should start from meaningful SD projections, not zeros.
-            with torch.no_grad():
-                proc.to_k_id.weight.copy_(m.to_k.weight.detach().to(proc.to_k_id.weight.dtype))
-                proc.to_v_id.weight.copy_(m.to_v.weight.detach().to(proc.to_v_id.weight.dtype))
 
             attn_procs[name] = proc
             n_cross += 1
@@ -597,17 +581,12 @@ def main(cfg_path: str):
     if insightface_device not in {"cuda", "cpu"}:
         raise ValueError(f"models.insightface_device must be 'cuda' or 'cpu', got: {insightface_device}")
     print(f"[init] insightface_device={insightface_device}")
-    id_token_mode = str(cfg["cond"].get("id_token_mode", "deterministic")).strip().lower()
-    id_token_mix = float(cfg["cond"].get("id_token_mix", 0.5))
-
     id_cond = IDArcFaceConditioner(
         n_tokens=n_tokens,
         cross_dim=cross_dim,
         device=insightface_device,
         proj_dtype=torch.float32,
         model_root=cfg["models"].get("insightface_root"),
-        token_mode=id_token_mode,
-        token_mix=id_token_mix,
     ).to(device)
 
     hair_classes = resolve_hair_classes(cfg["cond"])
@@ -653,18 +632,11 @@ def main(cfg_path: str):
         f"margin={focus_margin_logged}",
         f"square={focus_square_logged}",
     )
-    print("[init] use_id_tokens=", bool(cfg["cond"].get("use_id_tokens", False)))
-    print(f"[init] id_token_mode={id_cond.token_mode} id_token_mix={id_cond.token_mix:.3f}")
+    print("[init] separate ID-token branch: disabled/removed")
 
-    # ID embedder остается замороженным; id_proj можно обучать по конфигу.
+    # ArcFace extractor is frozen; identity enters only through Arc2Face text embeddings.
     id_cond.eval()
     id_cond.requires_grad_(False)
-    use_id_tokens_cfg = bool(cfg["cond"].get("use_id_tokens", False))
-    train_id_proj = bool(cfg["train"].get("train_id_proj", True)) and use_id_tokens_cfg and (
-        id_cond.token_mode in {"projected", "hybrid"}
-    )
-    if train_id_proj:
-        id_cond.proj.requires_grad_(True)
 
     eval_cfg = cfg.get("eval", {})
     eval_enabled = bool(eval_cfg.get("enabled", False))
@@ -727,8 +699,6 @@ def main(cfg_path: str):
 
     for proc in unet.attn_processors.values():
         if isinstance(proc, DualImageAttnProcessor):
-            proc.to_k_id.requires_grad_(False)
-            proc.to_v_id.requires_grad_(False)
             proc.to_k_hair.requires_grad_(True)
             proc.to_v_hair.requires_grad_(True)
 
@@ -737,20 +707,11 @@ def main(cfg_path: str):
         if isinstance(proc, DualImageAttnProcessor):
             dual_params += [p for p in proc.parameters() if p.requires_grad]
 
-    id_proj_params = [p for p in id_cond.proj.parameters() if p.requires_grad]
-    train_params = list(hair_cond.proj.parameters()) + dual_params + id_proj_params
-    id_proj_lr_mult = float(cfg["train"].get("id_proj_lr_mult", 0.5))
+    train_params = list(hair_cond.proj.parameters()) + dual_params
 
     param_groups = [
         {"params": list(hair_cond.proj.parameters()), "lr": float(cfg["train"]["lr"])},
     ]
-    if id_proj_params:
-        param_groups.append(
-            {
-                "params": id_proj_params,
-                "lr": float(cfg["train"]["lr"]) * id_proj_lr_mult,
-            }
-        )
     param_groups.append(
         {
             "params": dual_params,
@@ -766,18 +727,13 @@ def main(cfg_path: str):
     def count_trainable(m):
         return sum(p.numel() for p in m.parameters() if p.requires_grad)
 
-    print("trainable id_cond:", count_trainable(id_cond))
-    print("trainable id_proj:", count_trainable(id_cond.proj))
+    print("trainable arcface_extractor:", count_trainable(id_cond))
     print("trainable hair_cond:", count_trainable(hair_cond))
     print("trainable hair_proj:", count_trainable(hair_cond.proj))
     print(
         "lr hair_proj=", float(cfg["train"]["lr"]),
-        "lr id_proj=",
-        (float(cfg["train"]["lr"]) * id_proj_lr_mult) if id_proj_params else 0.0,
         "lr dual=",
         float(cfg["train"]["lr"]) * float(cfg["train"].get("dual_lr_mult", 1.0)),
-        "train_id_proj=",
-        bool(id_proj_params),
         "hair_aux_weight=",
         float(cfg["train"].get("hair_aux_weight", 0.0)),
         "cross_hair_clip_weight=",
@@ -820,11 +776,10 @@ def main(cfg_path: str):
                                 return_tensors="pt").to(device)
         text_emb_uc_s = pipe.text_encoder(**tok_uc).last_hidden_state.to(dtype_unet)
 
-        id0 = torch.zeros((1, 1, cross_dim), device=device, dtype=dtype_unet)
         h0 = torch.zeros((1, 1, cross_dim), device=device, dtype=dtype_unet)
 
-        enc_c = {"text": text_emb_s, "id": id0, "hair": h0}
-        enc_u = {"text": text_emb_uc_s, "id": id0, "hair": h0}
+        enc_c = {"text": text_emb_s, "hair": h0}
+        enc_u = {"text": text_emb_uc_s, "hair": h0}
 
         gen = torch.Generator(device=device).manual_seed(seed_s)
         lat0 = torch.randn((1, 4, 64, 64), device=device, dtype=dtype_unet, generator=gen)
@@ -846,7 +801,6 @@ def main(cfg_path: str):
     profile_timing = bool(cfg["train"].get("profile_timing", False))
     profile_sync_cuda = bool(cfg["train"].get("profile_sync_cuda", False))
     profile_every = int(cfg["train"].get("profile_every", log_every))
-    use_id_tokens = bool(cfg["cond"].get("use_id_tokens", False))
     only_both_face = bool(cfg["train"].get("only_both_face", False))
     timing_acc = defaultdict(float)
     timing_steps = 0
@@ -1009,19 +963,14 @@ def main(cfg_path: str):
         t0 = _t_start()
         hair_tokens = hair_cond(hair_pil_images, out_dtype=dtype_unet)  # [B, n_tokens, cross_dim]
         hair_tokens = hair_tokens / (hair_tokens.norm(dim=-1, keepdim=True) + 1e-6)
-        if use_id_tokens and (face_embs_512 is not None):
-            id_tokens = id_cond.embs_to_tokens(face_embs_512, out_dtype=dtype_unet)
-            id_tokens = id_tokens / (id_tokens.norm(dim=-1, keepdim=True) + 1e-6)
-        else:
-            id_tokens = torch.zeros_like(hair_tokens)
         src_idx = None
         hair_tokens_cross = None
         _t_stop("hair_tokens", t0)
         
         # Сборка conditioning
         t0 = _t_start()
-        enc = {"text": text_emb, "id": id_tokens, "hair": hair_tokens}
-        enc_hair_only = {"text": text_emb_empty, "id": id_tokens, "hair": hair_tokens}
+        enc = {"text": text_emb, "hair": hair_tokens}
+        enc_hair_only = {"text": text_emb_empty, "hair": hair_tokens}
         hair_aux_weight = float(cfg["train"].get("hair_aux_weight", 0.0))
         cross_hair_clip_weight = float(cfg["train"].get("cross_hair_clip_weight", 0.0))
         cross_hair_contrast_weight = float(cfg["train"].get("cross_hair_contrast_weight", 0.0))
@@ -1058,7 +1007,6 @@ def main(cfg_path: str):
                 t_cross = t[cross_idx]
                 enc_cross = {
                     "text": text_emb[cross_idx],
-                    "id": id_tokens[cross_idx],
                     "hair": hair_tokens_cross[cross_idx],
                 }
 
@@ -1260,7 +1208,6 @@ def main(cfg_path: str):
                     seed=int(eval_cfg.get("seed", 123)),
                     save_hair_debug=bool(eval_cfg.get("debug_hair_masks", True)),
                     cross_min_hair_coverage=float(cfg["train"].get("cross_min_hair_coverage", 0.02)),
-                    use_id_tokens=use_id_tokens,
                 )
 
                 # restore modes
@@ -1277,7 +1224,6 @@ def main(cfg_path: str):
             t0 = _t_start()
             ckpt = {
                 "step": step,
-                "id_proj": id_cond.proj.state_dict(),
                 "hair_proj": hair_cond.proj.state_dict(),
                 "dual_attn": {
                     k: v.state_dict()

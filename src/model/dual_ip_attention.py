@@ -4,28 +4,34 @@ import torch.nn.functional as F
 
 
 class DualImageAttnProcessor(nn.Module):
+    """
+    Hair-only IP-Adapter style attention processor.
+
+    The project used to carry a second ID-token branch. Identity is now provided
+    only through the Arc2Face text stream, while this processor learns only the
+    hair image stream. In dict mode it expects:
+      {"text": text_encoder_states, "hair": hair_tokens}
+
+    Important: like IP-Adapter, the extra image-attention output is added to the
+    text-attention output before the shared `attn.to_out` projection.
+    """
+
     def __init__(
         self,
         base_processor,
         hidden_size: int,
         cross_attention_dim: int,
-        scale_id: float = 1.0,
         scale_hair: float = 1.0,
         attn_fp32: bool = True,
     ):
         super().__init__()
         self.base = base_processor
-        self.scale_id = float(scale_id)
         self.scale_hair = float(scale_hair)
         self.attn_fp32 = bool(attn_fp32)
 
-        self.to_k_id = nn.Linear(cross_attention_dim, hidden_size, bias=False)
-        self.to_v_id = nn.Linear(cross_attention_dim, hidden_size, bias=False)
         self.to_k_hair = nn.Linear(cross_attention_dim, hidden_size, bias=False)
         self.to_v_hair = nn.Linear(cross_attention_dim, hidden_size, bias=False)
 
-        nn.init.zeros_(self.to_k_id.weight)
-        nn.init.zeros_(self.to_v_id.weight)
         nn.init.zeros_(self.to_k_hair.weight)
         nn.init.zeros_(self.to_v_hair.weight)
 
@@ -69,11 +75,10 @@ class DualImageAttnProcessor(nn.Module):
             )
 
         text_states = encoder_hidden_states["text"]
-        id_states = encoder_hidden_states["id"]
         hair_states = encoder_hidden_states["hair"]
 
-        # Fast-path: both external streams off
-        if torch.all(id_states == 0) and torch.all(hair_states == 0):
+        # Fast-path: external stream off -> exactly the original text cross-attention.
+        if self.scale_hair == 0.0 or torch.all(hair_states == 0):
             return self.base(
                 attn,
                 hidden_states,
@@ -83,83 +88,75 @@ class DualImageAttnProcessor(nn.Module):
                 **kwargs,
             )
 
-        # Base attention to text (diffusers handles masking/reshaping internally)
-        base_out = self.base(
-            attn,
-            hidden_states,
-            encoder_hidden_states=text_states,
-            attention_mask=attention_mask,
-            temb=temb,
-            **kwargs,
-        )
+        residual = hidden_states
+        if attn.spatial_norm is not None:
+            hidden_states = attn.spatial_norm(hidden_states, temb)
 
-        # If both scales are 0, return base_out exactly (keep original shape)
-        if (self.scale_id == 0.0) and (self.scale_hair == 0.0):
-            return base_out
+        input_ndim = hidden_states.ndim
+        if input_ndim == 4:
+            batch_size, channel, height, width = hidden_states.shape
+            hidden_states = hidden_states.view(batch_size, channel, height * width).transpose(1, 2)
+        else:
+            batch_size = hidden_states.shape[0]
+            channel = height = width = None
 
-        # Align hidden_states and base_out to (B,L,C) so additions are safe
-        hs_3d, _ = self._to_3d(hidden_states)
-        bo_3d, bo_hwc = self._to_3d(base_out)
+        sequence_length = text_states.shape[1]
+        attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
 
-        result = bo_3d
-        out_dtype = bo_3d.dtype
+        if attn.group_norm is not None:
+            hidden_states = attn.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
 
-        # Ensure id/hair dtype matches the projection layers
-        id_states = id_states.to(dtype=self.to_k_id.weight.dtype)
-        hair_states = hair_states.to(dtype=self.to_k_hair.weight.dtype)
+        query = attn.to_q(hidden_states)
+        out_dtype = query.dtype
 
-        # Shared query for both branches (must use same L as base_out)
-        query = attn.to_q(hs_3d)
+        if attn.norm_cross:
+            text_states = attn.norm_encoder_hidden_states(text_states)
+
+        k_text = attn.head_to_batch_dim(attn.to_k(text_states))
+        v_text = attn.head_to_batch_dim(attn.to_v(text_states))
         query = attn.head_to_batch_dim(query)
-        query_ = query.float() if self.attn_fp32 else query
+        query_for_scores = query.float() if self.attn_fp32 else query
 
-        # ID branch
-        if self.scale_id != 0.0:
-            k_id = attn.head_to_batch_dim(self.to_k_id(id_states))
-            v_id = attn.head_to_batch_dim(self.to_v_id(id_states))
+        if self.attn_fp32:
+            p_text = attn.get_attention_scores(query_for_scores, k_text.float(), attention_mask)
+            result = torch.bmm(p_text, v_text.float()).to(dtype=out_dtype)
+        else:
+            p_text = attn.get_attention_scores(query_for_scores, k_text, attention_mask)
+            result = torch.bmm(p_text, v_text)
 
-            if self.attn_fp32:
-                p_id = attn.get_attention_scores(query_, k_id.float(), attention_mask=None)
-                out_id = torch.bmm(p_id, v_id.float()).to(dtype=out_dtype)
+        result = attn.batch_to_head_dim(result)
+
+        # Hair branch. It is added before the shared output projection, matching IP-Adapter.
+        hair_states = hair_states.to(dtype=self.to_k_hair.weight.dtype)
+        k_h = attn.head_to_batch_dim(self.to_k_hair(hair_states))
+        v_h = attn.head_to_batch_dim(self.to_v_hair(hair_states))
+
+        if self.attn_fp32:
+            p_h = attn.get_attention_scores(query_for_scores, k_h.float(), attention_mask=None)
+            out_h = torch.bmm(p_h, v_h.float()).to(dtype=out_dtype)
+        else:
+            p_h = attn.get_attention_scores(query_for_scores, k_h, attention_mask=None)
+            out_h = torch.bmm(p_h, v_h)
+
+        out_h = attn.batch_to_head_dim(out_h)
+
+        if out_h.shape[1] != result.shape[1]:
+            if out_h.shape[1] > result.shape[1]:
+                out_h = out_h[:, : result.shape[1], :]
             else:
-                p_id = attn.get_attention_scores(query_, k_id, attention_mask=None)
-                out_id = torch.bmm(p_id, v_id)
+                out_h = F.pad(out_h, (0, 0, 0, result.shape[1] - out_h.shape[1]), value=0.0)
 
-            out_id = attn.batch_to_head_dim(out_id)                 # (B,L,C)
-            out_id = attn.to_out[1](attn.to_out[0](out_id))         # (B,L,C)
+        result = result + self.scale_hair * out_h
 
-            # Safety: match shapes (should already match, but protect against rare cases)
-            if out_id.shape[1] != result.shape[1]:
-                if out_id.shape[1] > result.shape[1]:
-                    out_id = out_id[:, : result.shape[1], :]
-                else:
-                    out_id = F.pad(out_id, (0, 0, 0, result.shape[1] - out_id.shape[1]), value=0.0)
+        result = result.to(dtype=attn.to_out[0].weight.dtype)
+        result = attn.to_out[0](result)
+        result = attn.to_out[1](result)
 
-            result = result + self.scale_id * out_id
+        if input_ndim == 4:
+            result = result.transpose(-1, -2).reshape(batch_size, channel, height, width)
 
-        # Hair branch
-        if self.scale_hair != 0.0:
-            k_h = attn.head_to_batch_dim(self.to_k_hair(hair_states))
-            v_h = attn.head_to_batch_dim(self.to_v_hair(hair_states))
+        if attn.residual_connection:
+            result = result + residual
 
-            if self.attn_fp32:
-                p_h = attn.get_attention_scores(query_, k_h.float(), attention_mask=None)
-                out_h = torch.bmm(p_h, v_h.float()).to(dtype=out_dtype)
-            else:
-                p_h = attn.get_attention_scores(query_, k_h, attention_mask=None)
-                out_h = torch.bmm(p_h, v_h)
-
-            out_h = attn.batch_to_head_dim(out_h)                   # (B,L,C)
-            out_h = attn.to_out[1](attn.to_out[0](out_h))           # (B,L,C)
-
-            if out_h.shape[1] != result.shape[1]:
-                if out_h.shape[1] > result.shape[1]:
-                    out_h = out_h[:, : result.shape[1], :]
-                else:
-                    out_h = F.pad(out_h, (0, 0, 0, result.shape[1] - out_h.shape[1]), value=0.0)
-
-            result = result + self.scale_hair * out_h
-
-        # Restore shape if base_out was 4D
-        result = self._restore_from_3d(result, bo_hwc)
+        result = result / attn.rescale_output_factor
         return result

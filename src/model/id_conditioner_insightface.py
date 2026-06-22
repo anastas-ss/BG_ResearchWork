@@ -1,7 +1,6 @@
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from PIL import Image
 
 from insightface.app import FaceAnalysis
@@ -26,8 +25,12 @@ class InsightFaceArcFaceEmbedder:
 
         self.app.prepare(ctx_id=ctx_id, det_size=(max_size, max_size))
 
-        # Логируем используемую модель распознавания.
-        print("Recognition model:", self.app.models["recognition"].model_file)
+        # Логируем используемую модель распознавания: train, inference и split
+        # должны видеть один и тот же Arc2Face-compatible файл.
+        recognition_model = str(self.app.models["recognition"].model_file)
+        print("Recognition model:", recognition_model)
+        if not recognition_model.endswith("arcface.onnx"):
+            print(f"[warn] expected Arc2Face-compatible recognition model arcface.onnx, got: {recognition_model}")
 
         self.det_sizes = [(size, size) for size in range(max_size, min_size - 1, -step)]
 
@@ -75,30 +78,6 @@ class IDArcFaceConditioner(nn.Module):
         self.cross_dim = cross_dim
 
         self.embedder = InsightFaceArcFaceEmbedder(device=device, model_root=model_root)
-        in_dim = 512
-
-        self.proj = nn.Sequential(
-            nn.Linear(in_dim, in_dim),
-            nn.GELU(),
-            nn.Linear(in_dim, n_tokens * cross_dim),
-        ).to(device=device, dtype=proj_dtype)
-
-    def embs_to_tokens(self, embs: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
-        """
-        Детерминированное frozen-преобразование ArcFace embedding в токены cross-attention.
-        - embs: [B, 512], ожидаются нормализованными
-        - returns: [B, n_tokens, cross_dim]
-        """
-        if embs.dim() != 2 or embs.shape[1] != 512:
-            raise ValueError(f"Expected embs shape [B,512], got {tuple(embs.shape)}")
-
-        if self.cross_dim >= 512:
-            base = F.pad(embs, (0, self.cross_dim - 512), value=0.0)
-        else:
-            base = embs[:, : self.cross_dim]
-
-        tokens = base.unsqueeze(1).repeat(1, self.n_tokens, 1)
-        return tokens.to(dtype=out_dtype)
 
     @torch.no_grad()
     def extract_arcface_embs(self, pil_list, return_mask: bool = False, eps: float = 1e-12):
@@ -132,10 +111,8 @@ class IDArcFaceConditioner(nn.Module):
         return out.to(self.device)
 
     def forward(self, pil_images, out_dtype: torch.dtype, return_mask: bool = False):
+        embs = self.extract_arcface_embs(pil_images, return_mask=return_mask)
         if return_mask:
-            embs, mask = self.extract_arcface_embs(pil_images, return_mask=True)
-            tokens = self.embs_to_tokens(embs, out_dtype=out_dtype)
-            return tokens, mask
-
-        embs = self.extract_arcface_embs(pil_images, return_mask=False)
-        return self.embs_to_tokens(embs, out_dtype=out_dtype)
+            face_embs, mask = embs
+            return face_embs.to(dtype=out_dtype), mask
+        return embs.to(dtype=out_dtype)

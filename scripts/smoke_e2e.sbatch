@@ -113,11 +113,7 @@ if [ -z "${HAIR_CLASS_PRIMARY}" ]; then
   HAIR_CLASS_PRIMARY="17"
 fi
 echo "[env] hair_classes=${HAIR_CLASSES}"
-SCALE_ID="${SCALE_ID:-0.0}"
 SCALE_HAIR="${SCALE_HAIR:-0.65}"
-USE_ID_TOKENS="${USE_ID_TOKENS:-0}"
-ID_TOKEN_MODE="${ID_TOKEN_MODE:-auto}"
-ID_TOKEN_MIX="${ID_TOKEN_MIX:-0.5}"
 HAIR_MASK_DILATE_KERNEL="${HAIR_MASK_DILATE_KERNEL:-1}"
 HAIR_MASK_DILATE_ITERS="${HAIR_MASK_DILATE_ITERS:-1}"
 ARCFACE_NAME="${ARCFACE_NAME:-antelopev2}"
@@ -142,11 +138,7 @@ HAIR_FOCUS_CROP_SQUARE="${HAIR_FOCUS_CROP_SQUARE:-1}"
   --steps 20 \
   --guidance 7.0 \
   --seed 123 \
-  --scale_id "${SCALE_ID}" \
   --scale_hair "${SCALE_HAIR}" \
-  --use_id_tokens "${USE_ID_TOKENS}" \
-  --id_token_mode "${ID_TOKEN_MODE}" \
-  --id_token_mix "${ID_TOKEN_MIX}" \
   --hair_class "${HAIR_CLASS_PRIMARY}" \
   --hair_classes "${HAIR_CLASSES}" \
   --hair_mask_dilate_kernel "${HAIR_MASK_DILATE_KERNEL}" \

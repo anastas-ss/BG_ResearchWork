@@ -28,10 +28,6 @@ models:
 
 cond:
   n_tokens: 4
-  use_id_tokens: false
-  id_token_mode: deterministic
-  id_token_mix: 0.5
-  scale_id: 0.0
   scale_hair: 0.65
   hair_bg_value: 0.0
   hair_class: 17
@@ -43,8 +39,6 @@ cond:
   hair_focus_crop_square: true
 
 train:
-  train_id_proj: false
-  id_proj_lr_mult: 0.5
   only_both_face: true
   batch_size: 2
   lr: 7e-5

@@ -23,7 +23,7 @@ def load_pil(path: str, size: int = 512) -> Image.Image:
     return im
 
 
-def inject_dual_attn(pipe, scale_id: float, scale_hair: float, attn_fp32: bool = True):
+def inject_dual_attn(pipe, scale_hair: float, attn_fp32: bool = True):
     unet = pipe.unet
     cross_dim = unet.config.cross_attention_dim
 
@@ -42,14 +42,9 @@ def inject_dual_attn(pipe, scale_id: float, scale_hair: float, attn_fp32: bool =
                 base_processor=base_proc,
                 hidden_size=hidden_size,
                 cross_attention_dim=cross_dim,
-                scale_id=float(scale_id),
                 scale_hair=float(scale_hair),
                 attn_fp32=attn_fp32,
             ).to(device=pipe.device, dtype=torch.float32)
-
-            with torch.no_grad():
-                proc.to_k_id.weight.copy_(m.to_k.weight.detach().to(proc.to_k_id.weight.dtype))
-                proc.to_v_id.weight.copy_(m.to_v.weight.detach().to(proc.to_v_id.weight.dtype))
 
             attn_procs[name] = proc
             n_cross += 1
@@ -60,12 +55,9 @@ def inject_dual_attn(pipe, scale_id: float, scale_hair: float, attn_fp32: bool =
     print(f"[init] injected DualImageAttnProcessor into {n_cross} cross-attn blocks")
 
 
-def load_ckpt_into_modules(pipe, id_cond, hair_cond, ckpt_path: str):
+def load_ckpt_into_modules(pipe, hair_cond, ckpt_path: str):
     ckpt = torch.load(ckpt_path, map_location="cpu")
 
-    # projections
-    if "id_proj" in ckpt:
-        id_cond.proj.load_state_dict(ckpt["id_proj"], strict=True)
     if "hair_proj" in ckpt:
         hair_cond.proj.load_state_dict(ckpt["hair_proj"], strict=True)
 
@@ -73,7 +65,11 @@ def load_ckpt_into_modules(pipe, id_cond, hair_cond, ckpt_path: str):
     dual = ckpt.get("dual_attn", {})
     for k, proc in pipe.unet.attn_processors.items():
         if isinstance(proc, DualImageAttnProcessor) and k in dual:
-            proc.load_state_dict(dual[k], strict=True)
+            missing, unexpected = proc.load_state_dict(dual[k], strict=False)
+            if missing or unexpected:
+                print(
+                    f"[ckpt] dual_attn {k}: missing={list(missing)} unexpected={list(unexpected)}"
+                )
 
     print("[ckpt] loaded:", ckpt_path)
 
@@ -111,10 +107,9 @@ def generate_one(
 
     hair_tokens = hair_cond([pil_hair], out_dtype=dtype_unet)
     hair_tokens = hair_tokens / (hair_tokens.norm(dim=-1, keepdim=True) + 1e-6)
-    id_tokens = torch.zeros_like(hair_tokens)
 
-    enc_cond = {"text": text_emb, "id": id_tokens, "hair": hair_tokens}
-    enc_uncond = {"text": text_emb_uc, "id": torch.zeros_like(id_tokens), "hair": torch.zeros_like(hair_tokens)}
+    enc_cond = {"text": text_emb, "hair": hair_tokens}
+    enc_uncond = {"text": text_emb_uc, "hair": torch.zeros_like(hair_tokens)}
 
     # initial noise
     vae_sf = pipe.vae_scale_factor if hasattr(pipe, "vae_scale_factor") else 8
@@ -156,9 +151,15 @@ def main():
     ap.add_argument("--guidance", type=float, default=7.0)
     ap.add_argument("--seed", type=int, default=123)
 
-    ap.add_argument("--scale_id", type=float, default=0.0)
     ap.add_argument("--scale_hair", type=float, default=1.0)
     ap.add_argument("--hair_class", type=int, default=17)
+    ap.add_argument("--hair_classes", type=str, default="17")
+    ap.add_argument("--hair_mask_dilate_kernel", type=int, default=1)
+    ap.add_argument("--hair_mask_dilate_iters", type=int, default=1)
+    ap.add_argument("--hair_focus_crop", type=int, default=0)
+    ap.add_argument("--hair_focus_crop_margin", type=float, default=0.20)
+    ap.add_argument("--hair_focus_crop_square", type=int, default=1)
+    ap.add_argument("--insightface_root", type=str, default=None)
 
     ap.add_argument("--n_tokens", type=int, default=4)
     ap.add_argument("--max_items", type=int, default=0, help="0 = all")
@@ -194,7 +195,7 @@ def main():
 
     pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
 
-    inject_dual_attn(pipe, scale_id=args.scale_id, scale_hair=args.scale_hair, attn_fp32=True)
+    inject_dual_attn(pipe, scale_hair=args.scale_hair, attn_fp32=True)
 
     cross_dim = pipe.unet.config.cross_attention_dim
 
@@ -203,6 +204,7 @@ def main():
         cross_dim=cross_dim,
         device=device,
         proj_dtype=torch.float32,
+        model_root=args.insightface_root,
     ).to(device).eval()
 
     hair_cond = HairConditioner(
@@ -218,7 +220,7 @@ def main():
     ).to(device).eval()
 
     # load ckpt
-    load_ckpt_into_modules(pipe, id_cond, hair_cond, args.ckpt)
+    load_ckpt_into_modules(pipe, hair_cond, args.ckpt)
 
     # run
     rows = []

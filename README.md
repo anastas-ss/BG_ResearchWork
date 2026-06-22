@@ -8,21 +8,20 @@
 - **SD1.5** как frozen backbone (VAE/UNet/Text Encoder не дообучаются полностью)
 - **Arc2Face-путь для ID**: embedding лица извлекается из исходного фото, не обучается и встраивается в prompt-эмбеддинги
 - **Отдельная обучаемая hair-ветка**: сегментация волос (BiSeNet) -> CLIP Vision -> projection в cross-attention
-- **Опциональная ID-ветка в dual-attention**: по умолчанию выключена; ID идет через frozen Arc2Face text stream
 
 Цель: генерировать лицо с сохранением identity и контролем прически.
 
 ## Текущий статус
 
-- ID-ветка frozen (`trainable id_cond: 0`)
+- Identity-часть frozen: ArcFace/Arc2Face используется только для text stream
 - Hair-ветка trainable (`hair_cond`, `hair_proj`)
 - В UNet внедрен `DualImageAttnProcessor` во все `attn2` блоки
 - Добавлены диагностические режимы:
-  - `both_on`: text + id + hair
-  - `id_only`: text + id + 0
-  - `hair_only`: text + 0 + hair
-  - `both_off`: text + 0 + 0
-  - `cross_hair`: text + id(A) + hair(B)
+  - `hair_on`: Arc2Face text + hair
+  - `hair_off`: Arc2Face text + 0
+  - `empty_text_hair`: empty ArcFace text + hair
+  - `empty_text_off`: empty ArcFace text + 0
+  - `cross_hair`: Arc2Face text(A) + hair(B)
 
 ## Структура проекта
 
@@ -30,7 +29,7 @@
 - `inference.py` — инференс по CSV-парам
 - `metrics.py` — метрики (ID/hair/FID)
 - `config.yaml` — основной конфиг
-- `src/model/id_conditioner_insightface.py` — ArcFace/ID conditioning
+- `src/model/id_conditioner_insightface.py` — frozen ArcFace extractor for Arc2Face text conditioning
 - `src/model/hair_conditioner_parsing.py` — hair conditioning + BiSeNet маски
 - `src/model/dual_ip_attention.py` — dual conditioning в cross-attention
 - `src/utils/project_face_embs.py` — Arc2Face-проекция эмбеддингов лица в text stream
@@ -137,12 +136,13 @@ python train.py --cfg config.cluster.yaml
 
 Текущий формат строки:
 
-`original | both_on | id_only | hair_only | both_off | cross_hair | hair_source_B | hair_source_B_masked`
+`original | hair_on | hair_off | empty_text_hair | empty_text_off | cross_hair | hair_source_B | hair_source_B_masked`
 
 Где:
-- `both_on` должно быть основным результатом
-- `id_only` показывает вклад ID без hair
-- `hair_only` показывает вклад hair без ID
+- `hair_on` должно быть основным результатом: Arc2Face text + hair condition
+- `hair_off` показывает базовое Arc2Face-воспроизведение без hair condition
+- `empty_text_hair` показывает вклад hair condition без ArcFace identity text
+- `empty_text_off` показывает полностью выключенные дополнительные условия
 - `cross_hair` нужен для проверки переноса волос из другого источника B
 
 ## Важные train-параметры
@@ -213,9 +213,7 @@ python inference.py \
   --hair_weights /path/to/79999_iter.pth \
   --ckpt /path/to/ckpt_stepXXXX.pt \
   --insightface_root /path/to/insightface_root \
-  --scale_id 0.0 \
   --scale_hair 0.65 \
-  --use_id_tokens 0 \
   --hair_class 17 \
   --hair_classes 17 \
   --hair_mask_dilate_kernel 1 \
@@ -223,6 +221,28 @@ python inference.py \
   --hair_focus_crop 1 \
   --hair_focus_crop_margin 0.20 \
   --hair_focus_crop_square 1
+```
+
+### Обязательный контроль: no-hair на step 0
+
+Перед сравнением обученных чекпоинтов нужно запустить baseline:
+
+- `ckpt_step0.pt`
+- `scale_hair=0.0`
+- те же `pairs.csv`, `seed`, `steps`, `guidance`, что и для финального чекпоинта
+
+Если уже на `ckpt_step0 + scale_hair=0.0` генерации выглядят сломанными, проблема не в
+обучении hair-ветки, а в базовом воспроизведении Arc2Face/инференса.
+
+SLURM-шаблон:
+
+```bash
+PAIRS_CSV=eval/ckpt_compare/pairs_256.csv \
+OUT_DIR=runs/step0_nohair \
+CKPT_PATH=runs/<exp_name>/ckpt_step0.pt \
+HAIR_WEIGHTS=/home/arobryadchikova/weights/79999_iter.pth \
+SCALE_HAIR=0.0 \
+sbatch scripts/infer.sbatch
 ```
 
 Готовая ячейка для Colab:
@@ -239,9 +259,7 @@ python inference.py \
   --steps 30 \
   --guidance 7.0 \
   --seed 123 \
-  --scale_id 0.0 \
   --scale_hair 0.65 \
-  --use_id_tokens 0 \
   --hair_class 17 \
   --hair_classes 17 \
   --hair_mask_dilate_kernel 1 \
@@ -315,7 +333,7 @@ python metrics.py \
 - уменьшить `cross_hair_clip_batch`
 - оставить `cross_hair_decode_size=256`
 
-2. **`cross_hair` почти не отличается от `both_on`**
+2. **`cross_hair` почти не отличается от `hair_on`**
 - увеличить `cross_hair_clip_weight`
 - уменьшить `cross_hair_clip_every`
 - затем контролировать артефакты (слишком сильный cross-loss может портить лицо)
