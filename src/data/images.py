@@ -43,11 +43,15 @@ class ImageFolderDataset(Dataset):
 
 class PairedImageDataset(Dataset):
     """
-    Dataset for identity-disjoint hair-transfer training/evaluation pairs.
+    Dataset for identity-disjoint conditional training/evaluation rows.
 
     Expected CSV columns:
       - target or ref_id: image used as denoising target and identity condition
-      - ref_hair: different image used as hair condition
+      - ref_hair: image used as hair condition
+
+    The training split builder uses single-image self-reconstruction, so target,
+    ref_id and ref_hair contain the same path. Inference CSV files may use
+    different ref_id and ref_hair images.
 
     Optional columns are preserved only as paths/metadata in downstream logs.
     """

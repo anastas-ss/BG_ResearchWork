@@ -2,23 +2,33 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 .DS_Store
+.venv*/
 
 runs/
 outputs/
 logs/
+data/
+eval/
+models/
+weights/
 *.log
 *.out
 *.err
 
 cluster_results*/
 cluster_results_download/
+reports/
+report_data/
+coursework/
+tmp/
+.tmp*/
+ОтчетыНаучка/
+detailed_report_*.md
 report_data_ckpt_compare.tar.gz
 *.tar.gz
 *.zip
-
-reports/noid_*/
-reports/*_bundle/
-reports/*_training_dynamics/
+*.pdf
+*.ipynb
 
 .cache/
 **/.cache/
@@ -32,3 +42,19 @@ huggingface/
 *.onnx
 
 .env
+
+# Local diagnostics and experiment sweep helpers.
+hair_leakage_check.py
+src/utils/hair_leakage_check.py
+scripts/check_*
+scripts/inspect_*
+scripts/make_*
+scripts/download_*
+scripts/submit_*
+scripts/projectfix_*
+scripts/smoke_*
+config.cluster.*debug*.yaml
+config.cluster.*smoke*.yaml
+config.cluster.*continue*.yaml
+config.cluster.*v4*.yaml
+config.cluster.fullclean.long.single_image_patch.yaml
