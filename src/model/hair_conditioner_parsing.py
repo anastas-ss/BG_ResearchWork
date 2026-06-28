@@ -147,6 +147,13 @@ class HairConditioner(nn.Module):
         bg_value=0.0,
         hair_class: int = 17,
         debug_save: bool = False,
+        token_mode: str = "global",
+        patch_mask_threshold: float = 0.05,
+        max_patch_tokens: int = 64,
+        patch_post_layernorm: bool = False,
+        patch_binary_mask: bool = False,
+        apply_token_mask_to_values: bool = True,
+        token_normalization: str = "l2",
     ):
         super().__init__()
         self.device = device
@@ -154,6 +161,23 @@ class HairConditioner(nn.Module):
         self.cross_dim = int(cross_dim)
         self.bg_value = float(bg_value)
         self.debug_save = bool(debug_save)
+        self.token_mode = str(token_mode)
+        self.patch_mask_threshold = float(patch_mask_threshold)
+        self.max_patch_tokens = int(max_patch_tokens)
+        self.patch_post_layernorm = bool(patch_post_layernorm)
+        self.patch_binary_mask = bool(patch_binary_mask)
+        self.apply_token_mask_to_values = bool(apply_token_mask_to_values)
+        self.token_normalization = str(token_normalization)
+        self.last_debug_stats = {}
+        if self.token_mode not in {"global", "patch"}:
+            raise ValueError(f"token_mode must be 'global' or 'patch', got: {self.token_mode}")
+        if self.token_normalization not in {"l2", "layernorm", "none"}:
+            raise ValueError(
+                "token_normalization must be 'l2', 'layernorm', or 'none', "
+                f"got: {self.token_normalization}"
+            )
+        if self.token_mode == "global" and self.token_normalization == "layernorm":
+            raise ValueError("layernorm token normalization is currently supported only in patch mode")
 
         self.enc_h = HairSegmentationEncoder(
             hair_weights_path, device=device, hair_class=hair_class
@@ -166,19 +190,33 @@ class HairConditioner(nn.Module):
         self.proc = CLIPImageProcessor.from_pretrained(clip_vision_id)
 
         in_dim = self.clip.config.hidden_size
-        self.proj = nn.Sequential(
-            nn.Linear(in_dim, in_dim),
-            nn.GELU(),
-            nn.Linear(in_dim, self.n_tokens * self.cross_dim),
-        ).to(device=device, dtype=proj_dtype)
+        if self.token_mode == "global":
+            self.proj = nn.Sequential(
+                nn.Linear(in_dim, in_dim),
+                nn.GELU(),
+                nn.Linear(in_dim, self.n_tokens * self.cross_dim),
+            ).to(device=device, dtype=proj_dtype)
+        else:
+            projection_layers = [
+                nn.Linear(in_dim, in_dim),
+                nn.GELU(),
+                nn.Linear(in_dim, self.cross_dim),
+            ]
+            if self.token_normalization == "layernorm":
+                projection_layers.append(nn.LayerNorm(self.cross_dim))
+            self.proj = nn.Sequential(*projection_layers).to(
+                device=device,
+                dtype=proj_dtype,
+            )
 
     @torch.no_grad()
     def get_hair_masks(self, pil_images):
         return self.enc_h(pil_images)  # (B,512,512) float {0,1}
     
     @torch.no_grad()
-    def _pooled_hair(self, pil_images):
-        masks = self.enc_h(pil_images)  # (B,512,512)
+    def _pooled_hair(self, pil_images, masks=None):
+        if masks is None:
+            masks = self.enc_h(pil_images)  # (B,512,512)
         hair_pil = [apply_mask_to_pil(im, masks[i], bg=self.bg_value) for i, im in enumerate(pil_images)]
 
         if self.debug_save and len(hair_pil) > 0:
@@ -188,10 +226,98 @@ class HairConditioner(nn.Module):
         pooled = self.clip(**inputs).pooler_output  # (B,in_dim)
         return pooled
 
-    def forward(self, pil_images, out_dtype: torch.dtype):
-        pooled = self._pooled_hair(pil_images)
-        pooled = pooled / (pooled.norm(dim=-1, keepdim=True) + 1e-6)
-        tokens = self.proj(pooled.float()).view(-1, self.n_tokens, self.cross_dim)
-        # Keep token magnitude bounded; otherwise hair branch can explode and dominate generation.
-        tokens = tokens / (tokens.norm(dim=-1, keepdim=True) + 1e-6)
-        return tokens.to(dtype=out_dtype)
+    @torch.no_grad()
+    def _patch_hair(self, pil_images):
+        masks = self.enc_h(pil_images)
+        hair_pil = [apply_mask_to_pil(im, masks[i], bg=self.bg_value) for i, im in enumerate(pil_images)]
+
+        if self.debug_save and len(hair_pil) > 0:
+            hair_pil[0].save("debug_hair.png")
+
+        inputs = self.proc(images=hair_pil, return_tensors="pt").to(self.device)
+        patch_tokens = self.clip(**inputs).last_hidden_state[:, 1:]
+        raw_patch_norm = patch_tokens.detach().float().norm(dim=-1)
+        if self.patch_post_layernorm:
+            patch_tokens = self.clip.vision_model.post_layernorm(patch_tokens)
+        normalized_patch_norm = patch_tokens.detach().float().norm(dim=-1)
+        patch_count = patch_tokens.shape[1]
+        patch_grid = int(round(patch_count ** 0.5))
+        if patch_grid * patch_grid != patch_count:
+            raise RuntimeError(f"CLIP patch count must form a square grid, got: {patch_count}")
+
+        patch_mask = F.interpolate(
+            masks.unsqueeze(1),
+            size=(patch_grid, patch_grid),
+            mode="area",
+        )[:, 0].flatten(1)
+        patch_mask = torch.where(
+            patch_mask >= self.patch_mask_threshold,
+            patch_mask,
+            torch.zeros_like(patch_mask),
+        )
+        if 0 < self.max_patch_tokens < patch_count:
+            patch_mask, patch_indices = patch_mask.topk(
+                self.max_patch_tokens,
+                dim=1,
+                largest=True,
+                sorted=False,
+            )
+            patch_tokens = torch.gather(
+                patch_tokens,
+                dim=1,
+                index=patch_indices.unsqueeze(-1).expand(-1, -1, patch_tokens.shape[-1]),
+            )
+        if self.patch_binary_mask:
+            patch_mask = (patch_mask > 0).to(dtype=patch_mask.dtype)
+        active = patch_mask > 0
+        self.last_debug_stats = {
+            "raw_patch_norm_mean": raw_patch_norm.mean().item(),
+            "post_layernorm_patch_norm_mean": normalized_patch_norm.mean().item(),
+            "active_patch_count_mean": active.float().sum(dim=1).mean().item(),
+            "active_patch_weight_mean": (
+                patch_mask[active].mean().item() if active.any() else 0.0
+            ),
+            "spatial_mask_coverage": masks.float().mean().item(),
+        }
+        return patch_tokens, patch_mask, masks
+
+    def forward(
+        self,
+        pil_images,
+        out_dtype: torch.dtype,
+        return_masks: bool = False,
+    ):
+        if self.token_mode == "global":
+            masks = self.enc_h(pil_images)
+            pooled = self._pooled_hair(pil_images, masks=masks)
+            pooled = pooled / (pooled.norm(dim=-1, keepdim=True) + 1e-6)
+            tokens = self.proj(pooled.float()).view(-1, self.n_tokens, self.cross_dim)
+            token_mask = torch.ones(
+                tokens.shape[:2],
+                device=tokens.device,
+                dtype=torch.float32,
+            )
+        else:
+            patch_tokens, token_mask, masks = self._patch_hair(pil_images)
+            tokens = self.proj(patch_tokens.float())
+
+        projected_token_norm = tokens.detach().float().norm(dim=-1)
+        if self.token_normalization == "l2":
+            tokens = tokens / (tokens.norm(dim=-1, keepdim=True) + 1e-6)
+        if self.apply_token_mask_to_values:
+            tokens = tokens * token_mask.unsqueeze(-1).to(dtype=tokens.dtype)
+        active = token_mask > 0
+        self.last_debug_stats.update(
+            {
+                "projected_token_norm_mean": projected_token_norm.mean().item(),
+                "final_active_token_norm_mean": (
+                    tokens.detach().float().norm(dim=-1)[active].mean().item()
+                    if active.any()
+                    else 0.0
+                ),
+            }
+        )
+        tokens = tokens.to(dtype=out_dtype)
+        if return_masks:
+            return tokens, token_mask, masks
+        return tokens

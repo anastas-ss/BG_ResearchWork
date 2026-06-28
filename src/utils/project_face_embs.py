@@ -37,7 +37,6 @@ def project_face_embs(pipeline, face_embs):
         try:
             token_embs = text_encoder(
                 input_ids=input_ids_b,
-                attention_mask=attention_mask_b,
                 return_token_embs=True,
             )
 
@@ -51,7 +50,6 @@ def project_face_embs(pipeline, face_embs):
             token_embs[id_mask] = face_embs_padded
             prompt_embeds = text_encoder(
                 input_ids=input_ids_b,
-                attention_mask=attention_mask_b,
                 input_token_embs=token_embs,
             )[0]
             return prompt_embeds

@@ -80,12 +80,20 @@ def sanity_check_tokens(pipe, id_cond, hair_cond, dl, dtype_unet, n_samples=4):
     face_embs_512, face_mask = id_cond.extract_arcface_embs(pil_images, return_mask=True)
 
     # Hair tokens
-    hair_tokens = hair_cond(hair_images, out_dtype=dtype_unet)
-    hair_tokens = hair_tokens / (hair_tokens.norm(dim=-1, keepdim=True) + 1e-6)
+    hair_tokens, hair_token_mask, hair_spatial_mask = hair_cond(
+        hair_images,
+        out_dtype=dtype_unet,
+        return_masks=True,
+    )
 
     print("\n=== Sanity Check Tokens ===")
     print(f"face_mask: {face_mask.tolist()}")
     print(f"ArcFace emb mean abs: {face_embs_512.abs().mean().item():.4f}, norm mean: {face_embs_512.norm(dim=-1).mean().item():.4f}")
+    print(
+        f"Hair tokens shape: {tuple(hair_tokens.shape)}, "
+        f"active tokens mean: {(hair_token_mask > 0).float().sum(dim=1).mean().item():.1f}, "
+        f"spatial mask coverage: {hair_spatial_mask.float().mean().item():.4f}"
+    )
     print(f"Hair tokens mean abs: {hair_tokens.abs().mean().item():.4f}, norm mean: {hair_tokens.norm(dim=-1).mean().item():.4f}")
 
     # Проверка заморозки
@@ -273,9 +281,11 @@ def qualitative_check(
 
     face_mask = torch.ones(len(pil_images), device=pixel_values.device, dtype=torch.bool)
 
-    hair_tokens = hair_cond(hair_pil_images, out_dtype=dtype_unet)
-    hair_tokens = hair_tokens / (hair_tokens.norm(dim=-1, keepdim=True) + 1e-6)
-    hair_masks = hair_cond.get_hair_masks(hair_pil_images)
+    hair_tokens, hair_token_mask, hair_masks = hair_cond(
+        hair_pil_images,
+        out_dtype=dtype_unet,
+        return_masks=True,
+    )
     if save_hair_debug:
         _save_hair_debug_triplet(
             run_dir=run_dir,
@@ -324,10 +334,24 @@ def qualitative_check(
         text_emb_uc = pipe.text_encoder(**tok_uc).last_hidden_state.to(dtype_unet)
 
     variants = [
-        ("hair_on",         text_emb,       hair_tokens,                   3.0),
-        ("hair_off",        text_emb,       torch.zeros_like(hair_tokens), 3.0),
-        ("empty_text_hair", text_emb_empty, hair_tokens,                   3.0),
-        ("empty_text_off",  text_emb_empty, torch.zeros_like(hair_tokens), 3.0),
+        ("hair_on", text_emb, hair_tokens, hair_token_mask, hair_masks, 3.0),
+        (
+            "hair_off",
+            text_emb,
+            torch.zeros_like(hair_tokens),
+            torch.zeros_like(hair_token_mask),
+            torch.zeros_like(hair_masks),
+            3.0,
+        ),
+        ("empty_text_hair", text_emb_empty, hair_tokens, hair_token_mask, hair_masks, 3.0),
+        (
+            "empty_text_off",
+            text_emb_empty,
+            torch.zeros_like(hair_tokens),
+            torch.zeros_like(hair_token_mask),
+            torch.zeros_like(hair_masks),
+            3.0,
+        ),
     ]
     cross_src_idx0 = None
     src_img_b = None
@@ -339,18 +363,39 @@ def qualitative_check(
             min_hair_coverage=float(cross_min_hair_coverage),
         )
         hair_tokens_cross = hair_tokens[src_idx]
+        hair_token_mask_cross = hair_token_mask[src_idx]
+        hair_masks_cross = hair_masks[src_idx]
         cross_src_idx0 = int(src_idx[0].item())
         pil_b = hair_pil_images[cross_src_idx0].convert("RGB").resize((W, H))
         src_img_b = TVF.to_tensor(pil_b).unsqueeze(0).to(device=pixel_values.device, dtype=torch.float32)
         pil_b_masked = apply_mask_to_pil(pil_b, hair_masks[cross_src_idx0], bg=hair_cond.bg_value)
         src_img_b_masked = TVF.to_tensor(pil_b_masked).unsqueeze(0)
-        variants.append(("cross_hair", text_emb, hair_tokens_cross, 3.0))
+        variants.append(
+            (
+                "cross_hair",
+                text_emb,
+                hair_tokens_cross,
+                hair_token_mask_cross,
+                hair_masks_cross,
+                3.0,
+            )
+        )
 
     rows = []
     row_by_tag = {}
-    for tag, txt_t, hair_t, cfg_s in variants:
-        enc_cond   = {"text": txt_t, "hair": hair_t}
-        enc_uncond = {"text": text_emb_uc, "hair": torch.zeros_like(hair_t)}
+    for tag, txt_t, hair_t, token_mask_t, spatial_mask_t, cfg_s in variants:
+        enc_cond = {
+            "text": txt_t,
+            "hair": hair_t,
+            "hair_token_mask": token_mask_t,
+            "hair_spatial_mask": spatial_mask_t,
+        }
+        enc_uncond = {
+            "text": text_emb_uc,
+            "hair": torch.zeros_like(hair_t),
+            "hair_token_mask": torch.zeros_like(token_mask_t),
+            "hair_spatial_mask": torch.zeros_like(spatial_mask_t),
+        }
 
         lat = sample_with_cfg(
             pipe=pipe,
@@ -418,6 +463,72 @@ def build_hair_conditioner_compat(**kwargs):
     if dropped:
         print(f"[warn] HairConditioner ignores unsupported args on this code version: {dropped}")
     return HairConditioner(**filtered)
+
+
+def collect_hair_localization_loss(unet, device):
+    losses = [
+        proc.last_hair_localization_loss
+        for proc in unet.attn_processors.values()
+        if isinstance(proc, DualImageAttnProcessor)
+        and proc.last_hair_localization_loss is not None
+    ]
+    if not losses:
+        return torch.zeros((), device=device, dtype=torch.float32)
+    return torch.stack([loss.float() for loss in losses]).mean()
+
+
+def collect_hair_debug_stats(unet):
+    stats = [
+        proc.last_hair_debug_stats
+        for proc in unet.attn_processors.values()
+        if isinstance(proc, DualImageAttnProcessor)
+        and proc.last_hair_debug_stats is not None
+    ]
+    if not stats:
+        return {}
+    keys = stats[0].keys()
+    return {
+        key: torch.stack([item[key].float() for item in stats]).mean().detach()
+        for key in keys
+    }
+
+
+def gradient_norm(parameters) -> float:
+    squared = [
+        parameter.grad.detach().float().pow(2).sum()
+        for parameter in parameters
+        if parameter.grad is not None
+    ]
+    if not squared:
+        return 0.0
+    return torch.stack(squared).sum().sqrt().item()
+
+
+def region_weighted_denoising_loss(
+    prediction,
+    target,
+    spatial_mask,
+    *,
+    inside_weight: float,
+    outside_weight: float,
+    valid_samples=None,
+):
+    error = (prediction.float() - target.float()).pow(2).mean(dim=1)
+    mask = F.interpolate(
+        spatial_mask.float().unsqueeze(1),
+        size=error.shape[-2:],
+        mode="bilinear",
+        align_corners=False,
+    )[:, 0].clamp(0, 1)
+    weights = outside_weight + (inside_weight - outside_weight) * mask
+    per_sample = (error * weights).sum(dim=(1, 2)) / weights.sum(dim=(1, 2)).clamp_min(1e-6)
+    if valid_samples is not None:
+        valid_samples = valid_samples.to(device=per_sample.device, dtype=torch.bool)
+        if valid_samples.any():
+            per_sample = per_sample[valid_samples]
+        else:
+            return prediction.float().sum() * 0.0
+    return per_sample.mean()
 
 
 @torch.no_grad()
@@ -557,7 +668,17 @@ def main(cfg_path: str):
                 cross_attention_dim=cross_dim,
                 scale_hair=float(cfg["cond"]["scale_hair"]),
                 attn_fp32=True,
+                spatial_gate_hair=bool(cfg["cond"].get("hair_spatial_gate", False)),
             ).to(device=device, dtype=torch.float32)  # keep this module stable in fp32
+            hair_kv_init = str(cfg["cond"].get("hair_kv_init", "zero"))
+            if hair_kv_init == "text":
+                with torch.no_grad():
+                    proc.to_k_hair.weight.copy_(m.to_k.weight.detach().float())
+                    proc.to_v_hair.weight.copy_(m.to_v.weight.detach().float())
+            elif hair_kv_init != "zero":
+                raise ValueError(
+                    f"cond.hair_kv_init must be 'zero' or 'text', got: {hair_kv_init}"
+                )
 
             attn_procs[name] = proc
             n_cross += 1
@@ -611,6 +732,15 @@ def main(cfg_path: str):
         clip_dtype=torch.float16,
         proj_dtype=torch.float32,
         bg_value=float(cfg["cond"].get("hair_bg_value", 0.0)),
+        token_mode=str(cfg["cond"].get("hair_token_mode", "global")),
+        patch_mask_threshold=float(cfg["cond"].get("hair_patch_mask_threshold", 0.05)),
+        max_patch_tokens=int(cfg["cond"].get("hair_max_patch_tokens", 64)),
+        patch_post_layernorm=bool(cfg["cond"].get("hair_patch_post_layernorm", False)),
+        patch_binary_mask=bool(cfg["cond"].get("hair_patch_binary_mask", False)),
+        apply_token_mask_to_values=bool(
+            cfg["cond"].get("hair_apply_token_mask_to_values", True)
+        ),
+        token_normalization=str(cfg["cond"].get("hair_token_normalization", "l2")),
     ).to(device)
     enc_h = getattr(hair_cond, "enc_h", None)
     classes_logged = list(getattr(enc_h, "hair_classes", hair_classes))
@@ -632,7 +762,37 @@ def main(cfg_path: str):
         f"margin={focus_margin_logged}",
         f"square={focus_square_logged}",
     )
+    print(
+        "[init] hair_conditioning:",
+        f"token_mode={getattr(hair_cond, 'token_mode', 'global')}",
+        f"spatial_gate={bool(cfg['cond'].get('hair_spatial_gate', False))}",
+        f"patch_mask_threshold={float(cfg['cond'].get('hair_patch_mask_threshold', 0.05))}",
+        f"max_patch_tokens={int(cfg['cond'].get('hair_max_patch_tokens', 64))}",
+        f"patch_post_layernorm={bool(cfg['cond'].get('hair_patch_post_layernorm', False))}",
+        f"patch_binary_mask={bool(cfg['cond'].get('hair_patch_binary_mask', False))}",
+        f"mask_values={bool(cfg['cond'].get('hair_apply_token_mask_to_values', True))}",
+        f"token_normalization={str(cfg['cond'].get('hair_token_normalization', 'l2'))}",
+        f"kv_init={str(cfg['cond'].get('hair_kv_init', 'zero'))}",
+    )
     print("[init] separate ID-token branch: disabled/removed")
+
+    resume_ckpt = str(cfg.get("train", {}).get("resume_ckpt", "") or "").strip()
+    resume_step = 0
+    if resume_ckpt:
+        ckpt = torch.load(resume_ckpt, map_location="cpu")
+        if "hair_proj" in ckpt:
+            hair_cond.proj.load_state_dict(ckpt["hair_proj"], strict=True)
+        dual = ckpt.get("dual_attn", {})
+        for k, proc in unet.attn_processors.items():
+            if isinstance(proc, DualImageAttnProcessor) and k in dual:
+                missing, unexpected = proc.load_state_dict(dual[k], strict=False)
+                if missing or unexpected:
+                    print(
+                        f"[resume] dual_attn {k}: missing={list(missing)} unexpected={list(unexpected)}"
+                    )
+        if bool(cfg.get("train", {}).get("resume_step_number", True)):
+            resume_step = int(ckpt.get("step", -1)) + 1
+        print(f"[resume] loaded {resume_ckpt}; start_step={resume_step}")
 
     # ArcFace extractor is frozen; identity enters only through Arc2Face text embeddings.
     id_cond.eval()
@@ -730,12 +890,26 @@ def main(cfg_path: str):
     print("trainable arcface_extractor:", count_trainable(id_cond))
     print("trainable hair_cond:", count_trainable(hair_cond))
     print("trainable hair_proj:", count_trainable(hair_cond.proj))
+    id_cond_drop_prob = float(cfg["train"].get("id_cond_drop_prob", cfg["train"].get("text_cond_drop_prob", 0.0)))
+    hair_cond_drop_prob = float(cfg["train"].get("hair_cond_drop_prob", 0.0))
+    if not (0.0 <= id_cond_drop_prob <= 1.0 and 0.0 <= hair_cond_drop_prob <= 1.0):
+        raise ValueError(
+            "Conditioning dropout probabilities must be in [0, 1]: "
+            f"id_cond_drop_prob={id_cond_drop_prob}, "
+            f"hair_cond_drop_prob={hair_cond_drop_prob}"
+        )
     print(
         "lr hair_proj=", float(cfg["train"]["lr"]),
         "lr dual=",
         float(cfg["train"]["lr"]) * float(cfg["train"].get("dual_lr_mult", 1.0)),
         "hair_aux_weight=",
         float(cfg["train"].get("hair_aux_weight", 0.0)),
+        "hair_localization_weight=",
+        float(cfg["train"].get("hair_localization_weight", 0.0)),
+        "hair_loss_inside_weight=",
+        float(cfg["train"].get("hair_loss_inside_weight", 1.0)),
+        "hair_loss_outside_weight=",
+        float(cfg["train"].get("hair_loss_outside_weight", 0.05)),
         "cross_hair_clip_weight=",
         float(cfg["train"].get("cross_hair_clip_weight", 0.0)),
         "cross_hair_contrast_weight=",
@@ -748,6 +922,11 @@ def main(cfg_path: str):
         int(cfg["train"].get("cross_hair_clip_batch", 2)),
         "cross_hair_decode_size=",
         int(cfg["train"].get("cross_hair_decode_size", 256)),
+    )
+    print(
+        "conditioning_dropout:",
+        "id_cond_drop_prob=", id_cond_drop_prob,
+        "hair_cond_drop_prob=", hair_cond_drop_prob,
     )
 
     scaler = torch.amp.GradScaler("cuda", enabled=True)
@@ -801,6 +980,7 @@ def main(cfg_path: str):
     profile_timing = bool(cfg["train"].get("profile_timing", False))
     profile_sync_cuda = bool(cfg["train"].get("profile_sync_cuda", False))
     profile_every = int(cfg["train"].get("profile_every", log_every))
+    debug_conditioning_every = int(cfg["train"].get("debug_conditioning_every", 0))
     only_both_face = bool(cfg["train"].get("only_both_face", False))
     timing_acc = defaultdict(float)
     timing_steps = 0
@@ -845,7 +1025,7 @@ def main(cfg_path: str):
     id_cond.eval()
     hair_cond.train()
 
-    step = 0
+    step = resume_step
     it = iter(dl)
 
     while step < max_steps:
@@ -961,17 +1141,53 @@ def main(cfg_path: str):
 
         # Hair tokens
         t0 = _t_start()
-        hair_tokens = hair_cond(hair_pil_images, out_dtype=dtype_unet)  # [B, n_tokens, cross_dim]
-        hair_tokens = hair_tokens / (hair_tokens.norm(dim=-1, keepdim=True) + 1e-6)
+        hair_tokens, hair_token_mask, hair_spatial_mask = hair_cond(
+            hair_pil_images,
+            out_dtype=dtype_unet,
+            return_masks=True,
+        )
         src_idx = None
         hair_tokens_cross = None
         _t_stop("hair_tokens", t0)
         
         # Сборка conditioning
         t0 = _t_start()
-        enc = {"text": text_emb, "hair": hair_tokens}
-        enc_hair_only = {"text": text_emb_empty, "hair": hair_tokens}
+        train_text_emb = text_emb
+        train_hair_tokens = hair_tokens
+        train_hair_token_mask = hair_token_mask
+        train_hair_spatial_mask = hair_spatial_mask
+        drop_text = torch.zeros((B,), device=device, dtype=torch.bool)
+        drop_hair = torch.zeros((B,), device=device, dtype=torch.bool)
+        if id_cond_drop_prob > 0.0 or hair_cond_drop_prob > 0.0:
+            train_text_emb = text_emb.clone()
+            train_hair_tokens = hair_tokens.clone()
+            train_hair_token_mask = hair_token_mask.clone()
+            train_hair_spatial_mask = hair_spatial_mask.clone()
+            drop_text = torch.rand((B,), device=device) < id_cond_drop_prob
+            drop_hair = torch.rand((B,), device=device) < hair_cond_drop_prob
+            if drop_text.any():
+                train_text_emb[drop_text] = text_emb_empty[drop_text]
+            if drop_hair.any():
+                train_hair_tokens[drop_hair] = 0
+                train_hair_token_mask[drop_hair] = 0
+                train_hair_spatial_mask[drop_hair] = 0
+
+        enc = {
+            "text": train_text_emb,
+            "hair": train_hair_tokens,
+            "hair_token_mask": train_hair_token_mask,
+            "hair_spatial_mask": train_hair_spatial_mask,
+        }
+        enc_hair_only = {
+            "text": text_emb_empty,
+            "hair": hair_tokens,
+            "hair_token_mask": hair_token_mask,
+            "hair_spatial_mask": hair_spatial_mask,
+        }
         hair_aux_weight = float(cfg["train"].get("hair_aux_weight", 0.0))
+        hair_localization_weight = float(cfg["train"].get("hair_localization_weight", 0.0))
+        hair_loss_inside_weight = float(cfg["train"].get("hair_loss_inside_weight", 1.0))
+        hair_loss_outside_weight = float(cfg["train"].get("hair_loss_outside_weight", 0.05))
         cross_hair_clip_weight = float(cfg["train"].get("cross_hair_clip_weight", 0.0))
         cross_hair_contrast_weight = float(cfg["train"].get("cross_hair_contrast_weight", 0.0))
         cross_hair_margin = float(cfg["train"].get("cross_hair_margin", 0.1))
@@ -995,20 +1211,17 @@ def main(cfg_path: str):
                 else:
                     cross_idx = torch.arange(B, device=device)
 
-                hair_masks_all = hair_cond.get_hair_masks(hair_pil_images).detach()    # [B,512,512]
+                hair_masks_all = hair_spatial_mask.detach()
                 src_idx = select_cross_source_indices(
                     hair_tokens=hair_tokens,
                     hair_masks=hair_masks_all,
                     min_hair_coverage=cross_min_hair_coverage,
                 )
-                hair_tokens_cross = hair_tokens[src_idx]
+                hair_token_mask_cross = hair_token_mask[src_idx]
+                hair_spatial_mask_cross = hair_spatial_mask[src_idx]
 
                 noisy_cross = noisy[cross_idx]
                 t_cross = t[cross_idx]
-                enc_cross = {
-                    "text": text_emb[cross_idx],
-                    "hair": hair_tokens_cross[cross_idx],
-                }
 
                 ref_pooled_all = hair_cond._pooled_hair(hair_pil_images).detach().float()  # [B, D]
                 # positive target: source-B hair embedding
@@ -1018,6 +1231,13 @@ def main(cfg_path: str):
                 ref_pooled_neg = hair_cond._pooled_hair(pil_images).detach().float()[cross_idx]  # [Bc, D]
                 ref_pooled_neg = ref_pooled_neg / (ref_pooled_neg.norm(dim=-1, keepdim=True) + 1e-6)
                 hair_masks = hair_masks_all[src_idx][cross_idx].unsqueeze(1).to(device=device, dtype=torch.float32)
+            hair_tokens_cross = hair_tokens[src_idx]
+            enc_cross = {
+                "text": text_emb[cross_idx],
+                "hair": hair_tokens_cross[cross_idx],
+                "hair_token_mask": hair_token_mask_cross[cross_idx],
+                "hair_spatial_mask": hair_spatial_mask_cross[cross_idx],
+            }
         _t_stop("cross_prep", t0)
 
         # Train step (predict noise)
@@ -1026,14 +1246,36 @@ def main(cfg_path: str):
         t0 = _t_start()
         with torch.amp.autocast("cuda", dtype=torch.float16):
             noise_pred = pipe.unet(noisy, t, encoder_hidden_states=enc).sample
-            loss_main = F.mse_loss(noise_pred.float(), noise.float())
+            main_attention_stats = collect_hair_debug_stats(unet)
+            active_hair_samples = train_hair_token_mask.sum(dim=1) > 1e-6
+            loss_main = region_weighted_denoising_loss(
+                noise_pred,
+                noise,
+                train_hair_spatial_mask,
+                inside_weight=hair_loss_inside_weight,
+                outside_weight=hair_loss_outside_weight,
+                valid_samples=active_hair_samples,
+            )
+            loss_localization_main = collect_hair_localization_loss(unet, device)
             loss = loss_main
             if hair_aux_weight > 0.0:
                 noise_pred_h = pipe.unet(noisy, t, encoder_hidden_states=enc_hair_only).sample
-                loss_hair = F.mse_loss(noise_pred_h.float(), noise.float())
+                loss_hair = region_weighted_denoising_loss(
+                    noise_pred_h,
+                    noise,
+                    hair_spatial_mask,
+                    inside_weight=hair_loss_inside_weight,
+                    outside_weight=hair_loss_outside_weight,
+                    valid_samples=hair_token_mask.sum(dim=1) > 1e-6,
+                )
                 loss = loss + hair_aux_weight * loss_hair
+                loss_localization = collect_hair_localization_loss(unet, device)
             else:
                 loss_hair = torch.zeros((), device=device, dtype=loss_main.dtype)
+                loss_localization = loss_localization_main
+
+            if hair_localization_weight > 0.0:
+                loss = loss + hair_localization_weight * loss_localization
 
             if need_cross_clip:
                 noise_pred_cross = pipe.unet(noisy_cross, t_cross, encoder_hidden_states=enc_cross).sample
@@ -1086,12 +1328,55 @@ def main(cfg_path: str):
         _t_stop("cross_loss", t0)
 
         if not torch.isfinite(loss):
-            print(f"[step {step}] loss non-finite -> skipping")
+            enc_id_only_diag = {
+                "text": train_text_emb,
+                "hair": torch.zeros_like(train_hair_tokens),
+                "hair_token_mask": torch.zeros_like(train_hair_token_mask),
+                "hair_spatial_mask": torch.zeros_like(train_hair_spatial_mask),
+            }
+            with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.float16):
+                noise_pred_id_only_diag = pipe.unet(
+                    noisy,
+                    t,
+                    encoder_hidden_states=enc_id_only_diag,
+                ).sample
+            print(
+                f"[step {step}] loss non-finite -> skipping "
+                f"(main={loss_main.detach().item()}, "
+                f"hair_aux={loss_hair.detach().item()}, "
+                f"hair_loc={loss_localization.detach().item()}, "
+                f"cross_clip={loss_cross_clip.detach().item()}, "
+                f"cross_ctr={loss_cross_contrast.detach().item()}, "
+                f"timesteps={t.detach().cpu().tolist()}, "
+                f"drop_id={drop_text.detach().cpu().tolist()}, "
+                f"drop_hair={drop_hair.detach().cpu().tolist()}, "
+                f"text_finite={bool(torch.isfinite(train_text_emb).all())}, "
+                f"hair_finite={bool(torch.isfinite(train_hair_tokens).all())}, "
+                f"id_only_finite={bool(torch.isfinite(noise_pred_id_only_diag).all())})"
+            )
             continue
 
         t0 = _t_start()
         scaler.scale(loss).backward()
         scaler.unscale_(opt)
+        should_debug_conditioning = (
+            debug_conditioning_every > 0
+            and step % debug_conditioning_every == 0
+        )
+        if should_debug_conditioning:
+            hair_projection_grad_norm = gradient_norm(hair_cond.proj.parameters())
+            hair_key_grad_norm = gradient_norm(
+                parameter
+                for proc in unet.attn_processors.values()
+                if isinstance(proc, DualImageAttnProcessor)
+                for parameter in proc.to_k_hair.parameters()
+            )
+            hair_value_grad_norm = gradient_norm(
+                parameter
+                for proc in unet.attn_processors.values()
+                if isinstance(proc, DualImageAttnProcessor)
+                for parameter in proc.to_v_hair.parameters()
+            )
         torch.nn.utils.clip_grad_norm_(train_params, float(cfg["train"].get("grad_clip", 1.0)))
         scaler.step(opt)
         scaler.update()
@@ -1101,8 +1386,27 @@ def main(cfg_path: str):
             print(
                 f"[step {step}/{max_steps}] loss={loss.item():.6f} "
                 f"(main={loss_main.item():.6f}, hair_aux={loss_hair.item():.6f}, "
+                f"hair_loc={loss_localization.item():.6f}, "
                 f"cross_clip={loss_cross_clip.item():.6f}, cross_ctr={loss_cross_contrast.item():.6f})"
             )
+            if should_debug_conditioning:
+                conditioner_stats = getattr(hair_cond, "last_debug_stats", {})
+                conditioner_text = " ".join(
+                    f"{key}={value:.6f}"
+                    for key, value in sorted(conditioner_stats.items())
+                )
+                attention_text = " ".join(
+                    f"{key}={value.item():.6f}"
+                    for key, value in sorted(main_attention_stats.items())
+                )
+                print(f"[hair debug tokens] {conditioner_text}")
+                print(f"[hair debug attention] {attention_text}")
+                print(
+                    "[hair debug gradients] "
+                    f"proj={hair_projection_grad_norm:.6f} "
+                    f"key={hair_key_grad_norm:.6f} "
+                    f"value={hair_value_grad_norm:.6f}"
+                )
             if only_both_face:
                 print(
                     "[face_filter] kept_total=",

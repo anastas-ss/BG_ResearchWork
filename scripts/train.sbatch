@@ -20,13 +20,13 @@ export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
 export HF_HOME="${HF_HOME:-${HOME}/.cache/huggingface}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${HF_HOME}}"
 export INSIGHTFACE_MODEL_ROOT="${INSIGHTFACE_MODEL_ROOT:-${HOME}/.cache/insightface}"
-export CONDA_PREFIX="${CONDA_PREFIX:-/home/arobryadchikova/.conda/envs/bg-research}"
+export CONDA_PREFIX="${CONDA_PREFIX:-${HOME}/.conda/envs/bg-research}"
 export CUDNN_LIB="${CUDNN_LIB:-${CONDA_PREFIX}/lib/python3.10/site-packages/nvidia/cudnn/lib}"
 export CUBLAS_LIB="${CUBLAS_LIB:-${CONDA_PREFIX}/lib/python3.10/site-packages/nvidia/cublas/lib}"
 export CUDA_RUNTIME_LIB="${CUDA_RUNTIME_LIB:-${CONDA_PREFIX}/lib/python3.10/site-packages/nvidia/cuda_runtime/lib}"
 export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${CUDNN_LIB}:${CUBLAS_LIB}:${CUDA_RUNTIME_LIB}:${LD_LIBRARY_PATH:-}"
 
-PYTHON_BIN="${PYTHON_BIN:-/home/arobryadchikova/.conda/envs/bg-research/bin/python}"
+PYTHON_BIN="${PYTHON_BIN:-${CONDA_PREFIX}/bin/python}"
 CFG_FILE="${CFG_FILE:-config.cluster.fullclean.long.yaml}"
 
 nvidia-smi || true

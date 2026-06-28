@@ -33,22 +33,6 @@ def make_rel_or_abs(path: Path, relative_to: Path | None) -> str:
         return str(path)
 
 
-def choose_hair_source(
-    *,
-    row_idx: int,
-    split_indices: list[int],
-    labels: np.ndarray,
-    rng: random.Random,
-) -> int:
-    target_label = labels[row_idx]
-    candidates = [idx for idx in split_indices if idx != row_idx and labels[idx] != target_label]
-    if not candidates:
-        candidates = [idx for idx in split_indices if idx != row_idx]
-    if not candidates:
-        raise RuntimeError("Need at least two images to build paired CSV")
-    return rng.choice(candidates)
-
-
 def write_pairs(
     *,
     path: Path,
@@ -56,7 +40,6 @@ def write_pairs(
     indices: list[int],
     paths: list[Path],
     labels: np.ndarray,
-    rng: random.Random,
     relative_to: Path | None,
 ) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -72,24 +55,42 @@ def write_pairs(
             "split",
         ])
         for pair_id, idx in enumerate(indices):
-            hair_idx = choose_hair_source(row_idx=idx, split_indices=indices, labels=labels, rng=rng)
+            image_path = make_rel_or_abs(paths[idx], relative_to)
+            cluster_id = int(labels[idx])
             writer.writerow([
                 pair_id,
-                make_rel_or_abs(paths[idx], relative_to),
-                make_rel_or_abs(paths[idx], relative_to),
-                make_rel_or_abs(paths[hair_idx], relative_to),
-                int(labels[idx]),
-                int(labels[hair_idx]),
+                image_path,
+                image_path,
+                image_path,
+                cluster_id,
+                cluster_id,
                 split_name,
             ])
     return len(indices)
+
+
+def validate_single_image_pairs(path: Path) -> int:
+    with path.open("r", newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+
+    for row in rows:
+        if not (row["target"] == row["ref_id"] == row["ref_hair"]):
+            raise RuntimeError(
+                f"Invalid single-image pair {row.get('pair_id', '')} in {path}: "
+                "target, ref_id and ref_hair must match"
+            )
+        if row["target_cluster"] != row["hair_cluster"]:
+            raise RuntimeError(
+                f"Invalid cluster metadata for pair {row.get('pair_id', '')} in {path}"
+            )
+    return len(rows)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Build ArcFace/DBSCAN identity clusters, identity-disjoint train/val split, "
-            "and paired target/ref_hair CSV files."
+            "and single-image self-reconstruction CSV files."
         )
     )
     parser.add_argument("--image-root", required=True, help="Directory with input face images.")
@@ -164,7 +165,7 @@ def main() -> None:
     )
     if len(usable_clusters) < 2:
         raise SystemExit(
-            f"Need at least 2 usable clusters for cross-identity hair pairs; got {len(usable_clusters)}"
+            f"Need at least 2 usable clusters for identity-disjoint train/val split; got {len(usable_clusters)}"
         )
 
     rng.shuffle(usable_clusters)
@@ -203,7 +204,6 @@ def main() -> None:
         indices=split_to_indices["train"],
         paths=paths,
         labels=labels,
-        rng=rng,
         relative_to=relative_to,
     )
     n_val_pairs = write_pairs(
@@ -212,12 +212,16 @@ def main() -> None:
         indices=split_to_indices["val"],
         paths=paths,
         labels=labels,
-        rng=rng,
         relative_to=relative_to,
     )
+    if validate_single_image_pairs(train_pairs) != n_train:
+        raise RuntimeError(f"Unexpected row count in {train_pairs}")
+    if validate_single_image_pairs(val_pairs) != n_val_pairs:
+        raise RuntimeError(f"Unexpected row count in {val_pairs}")
 
     summary = {
         "image_root": str(image_root),
+        "pairing_mode": "single_image_self_reconstruction",
         "n_images": len(paths),
         "n_detected_faces": int(sum(has_face)),
         "dbscan": {
