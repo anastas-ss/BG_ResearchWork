@@ -194,8 +194,4 @@ python metrics.py \
   --out_csv runs/inference/metrics.csv
 ```
 
-Вычисляются `IDSim_arcface`, `Hair_IoU`, `Hair_Dice`, `dCLIP_hair`, `dDINO_hair` и опционально FID.
-
-## Что не хранится в Git
-
-В репозиторий не включаются датасеты, веса, чекпоинты, логи, результаты инференса, метрики, отчеты, изображения, материалы курсовой и вспомогательные отладочные скрипты.
+Вычисляются `IDSim_arcface`, `Hair_IoU`, `Hair_Dice`, `dCLIP_hair`, `dDINO_hair`.
